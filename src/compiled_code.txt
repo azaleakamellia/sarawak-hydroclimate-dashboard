@@ -1,0 +1,1206 @@
+
+==================================================
+FILE: compiled_code.txt
+==================================================
+
+
+
+
+==================================================
+FILE: drought_indices.py
+==================================================
+
+import pandas as pd
+import numpy as np
+from scipy import stats
+
+def calculate_spi(precip_series, scale=12):
+    """Calculates SPI using the Gamma distribution (McKee et al., 1993)."""
+    # Ensure no NaN values in input
+    if precip_series.isna().any():
+        print(f"  ⚠️ Warning: SPI input has {precip_series.isna().sum()} NaN values. Filling with 0.")
+        precip_series = precip_series.fillna(0)
+    
+    spi = pd.Series(np.nan, index=precip_series.index)
+    p = precip_series.reset_index(drop=True)
+    
+    if scale > 1:
+        # Use min_periods to avoid NaN propagation
+        precip_accumulated = p.rolling(window=scale, min_periods=scale).sum()
+    else:
+        precip_accumulated = p.copy()
+        
+    precip_accumulated.index = precip_series.index
+        
+    for month in range(1, 13):
+        month_mask = precip_accumulated.index.month == month
+        month_data = precip_accumulated[month_mask].dropna()
+        
+        # Reduced minimum requirement from 10 to 5 for better coverage
+        if len(month_data) < 5:
+            continue
+            
+        try:
+            alpha, loc, beta = stats.gamma.fit(month_data[month_data > 0] + 1e-6)
+            prob = stats.gamma.cdf(month_data, alpha, loc, beta)
+            prob = np.clip(prob, 0.0001, 0.9999)
+            spi[month_mask] = stats.norm.ppf(prob)
+        except Exception as e:
+            print(f"  ⚠️ SPI calculation failed for month {month}: {e}")
+            continue
+            
+    return spi
+
+def calculate_spei(precip_series, pet_series, scale=12):
+    """Calculates SPEI using the Log-Logistic distribution (Vicente-Serrano et al., 2010)."""
+    # Ensure no NaN values in input
+    if precip_series.isna().any():
+        print(f"  ⚠️ Warning: SPEI precipitation input has {precip_series.isna().sum()} NaN values. Filling with 0.")
+        precip_series = precip_series.fillna(0)
+    
+    if pet_series.isna().any():
+        print(f"  ⚠️ Warning: SPEI PET input has {pet_series.isna().sum()} NaN values. Filling with mean.")
+        pet_series = pet_series.fillna(pet_series.mean())
+    
+    p = precip_series.reset_index(drop=True)
+    pet = pet_series.reset_index(drop=True)
+    
+    # Use min_periods to avoid NaN propagation at the start
+    water_balance = (p - pet).rolling(window=scale, min_periods=scale).sum()
+    water_balance.index = precip_series.index
+    
+    spei = pd.Series(np.nan, index=water_balance.index)
+    
+    for month in range(1, 13):
+        month_mask = water_balance.index.month == month
+        month_data = water_balance[month_mask].dropna()
+        
+        # Reduced minimum requirement from 10 to 5 for better coverage
+        if len(month_data) < 5:
+            continue
+            
+        try:
+            # Shift data to be strictly positive for Fisk distribution fitting
+            min_val = month_data.min()
+            shift = abs(min_val) + 1e-6 if min_val <= 0 else 1e-6
+            shifted_data = month_data + shift
+            
+            c, loc, scale_param = stats.fisk.fit(shifted_data)
+            prob = stats.fisk.cdf(month_data + shift, c, loc, scale_param)
+            prob = np.clip(prob, 0.0001, 0.9999)
+            spei[month_mask] = stats.norm.ppf(prob)
+        except Exception as e:
+            print(f"  ⚠️ SPEI calculation failed for month {month}: {e}")
+            continue
+            
+    return spei
+
+def extract_drought_events(index_series, threshold=-1.0, min_duration=2, inter_event_time=1):
+    """Implements Run Theory with tropical modifications to extract drought events."""
+    events = []
+    in_drought = False
+    start_date = None
+    current_severity = 0.0
+    min_index = 0.0
+    
+    for date, value in index_series.items():
+        if pd.isna(value):
+            if in_drought:
+                events.append({
+                    'onset': start_date, 'termination': date, 
+                    'duration': 0, 'severity': current_severity, 'min_index': min_index
+                })
+                in_drought = False
+            continue
+            
+        if value <= threshold:
+            if not in_drought:
+                in_drought = True
+                start_date = date
+                current_severity = abs(value)
+                min_index = value
+            else:
+                current_severity += abs(value)
+                if value < min_index:
+                    min_index = value
+        else:
+            if in_drought:
+                in_drought = False
+                # FIX: Removed the +1 bug. Termination date is the first NON-drought month.
+                duration_months = (date.year - start_date.year) * 12 + (date.month - start_date.month)
+                events.append({
+                    'onset': start_date, 
+                    'termination': date, 
+                    'duration': duration_months, 
+                    'severity': current_severity, 
+                    'min_index': min_index
+                })
+                
+    # Handle drought that continues to the very end of the time series
+    if in_drought:
+        last_date = index_series.index[-1]
+        # FIX: We add +1 here because the last_date IS a drought month.
+        duration_months = (last_date.year - start_date.year) * 12 + (last_date.month - start_date.month) + 1
+        events.append({
+            'onset': start_date, 
+            'termination': last_date, 
+            'duration': duration_months, 
+            'severity': current_severity, 
+            'min_index': min_index
+        })
+        
+    df_events = pd.DataFrame(events)
+    if df_events.empty:
+        return df_events
+        
+    # Minimum Duration Filter (Tropical Modification: >= 2 months)
+    df_events = df_events[df_events['duration'] >= min_duration]
+    
+    # Inter-Event Time Criterion (Merging)
+    merged_events = []
+    for i, row in df_events.iterrows():
+        if merged_events:
+            last_event = merged_events[-1]
+            # FIX: Removed the -1 bug in gap calculation
+            gap_months = (row['onset'].year - last_event['termination'].year) * 12 + (row['onset'].month - last_event['termination'].month)
+            if gap_months <= inter_event_time:
+                last_event['termination'] = row['termination']
+                last_event['duration'] += row['duration']
+                last_event['severity'] += row['severity']
+                last_event['min_index'] = min(last_event['min_index'], row['min_index'])
+                continue
+        merged_events.append(row.to_dict())
+        
+    final_df = pd.DataFrame(merged_events)
+    if not final_df.empty:
+        final_df['intensity'] = final_df['severity'] / final_df['duration']
+        
+    return final_df
+
+
+==================================================
+FILE: drought_probability.py
+==================================================
+
+import pandas as pd
+import numpy as np
+
+def calculate_return_periods(events_df, total_months):
+    """
+    Calculates the Return Period (Tr) for each drought event based on Severity.
+    Tr = (N + 1) / m  (Weibull plotting position)
+    Where N = total years, m = rank of the event (1 = most severe).
+    """
+    if events_df.empty:
+        return events_df
+        
+    df = events_df.copy()
+    
+    # Rank events by severity (1 = most severe)
+    # ascending=False means highest severity gets rank 1
+    df['rank'] = df['severity'].rank(ascending=False, method='min')
+    
+    # Calculate Return Period in Years
+    total_years = total_months / 12.0
+    df['return_period_years'] = (total_years + 1) / df['rank']
+    
+    # Calculate Probability of Exceedance (Confidence Level)
+    # This is the probability that an event of this severity or worse occurs in any given year
+    df['probability_exceedance'] = 1.0 / df['return_period_years']
+    
+    # Categorize Drought (McKee et al. 1993)
+    # FIX: Changed 'min_spi' to 'min_index' to support both SPI and SPEI
+    conditions = [
+        (df['min_index'] <= -2.0),
+        (df['min_index'] <= -1.5),
+        (df['min_index'] <= -1.0)
+    ]
+    choices = ['Extreme', 'Severe', 'Moderate']
+    df['category'] = np.select(conditions, choices, default='Normal/Wet')
+    
+    return df.sort_values('onset')
+
+
+==================================================
+FILE: gee_sampler.py
+==================================================
+
+import ee
+import geopandas as gpd
+import pandas as pd
+import numpy as np
+from pathlib import Path
+from datetime import datetime
+
+# ==============================================================================
+# SCIENTIFIC CONFIGURATION & METADATA
+# ==============================================================================
+SPE_METADATA = {
+    "CHIRPS": {"asset": "UCSB-CHG/CHIRPS/DAILY", "band": "precipitation", "native_scale": 5566, "factor": 1.0},
+    "ERA5_LAND": {"asset": "ECMWF/ERA5_LAND/MONTHLY_AGGR", "band": "total_precipitation_sum", "native_scale": 11132, "factor": 1000.0},
+    "PERSIANN": {"asset": "NOAA/PERSIANN-CDR", "band": "precipitation", "native_scale": 27830, "factor": 1.0},
+}
+
+PET_METADATA = {
+    "ERA5_LAND": {"asset": "ECMWF/ERA5_LAND/MONTHLY_AGGR", "band": "potential_evaporation_sum", "native_scale": 11132, "factor": 1000.0},
+}
+
+DEM_METADATA = {
+    "SRTM": {"asset": "USGS/SRTMGL1_003", "band": "elevation", "native_scale": 30, "factor": 1.0},
+}
+
+LULC_METADATA = {
+    "MODIS": {"asset": "MODIS/061/MCD12Q1", "band": "LC_Type1", "native_scale": 500, "factor": 1.0},
+}
+
+def _month_bounds(year: int, month: int):
+    start = datetime(year, month, 1)
+    end = (datetime(year + 1, 1, 1) if month == 12 else datetime(year, month + 1, 1))
+    return start, end
+
+
+class HydroSampler:
+    def __init__(self, gauge_csv, col_station: str, col_lat: str, col_lon: str, 
+                 start_date: str, end_date: str, project_id: str, 
+                 master_scale: int = 5566, sampling: str = "native"):
+        if sampling not in ("native", "master"):
+            raise ValueError("sampling must be 'native' or 'master'.")
+
+        self.start_date = start_date
+        self.end_date = end_date
+        self.master_scale = int(master_scale)
+        self.sampling = sampling
+
+        self.start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        self.end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+        if self.start_dt >= self.end_dt:
+            raise ValueError("start_date must precede end_date.")
+
+        try:
+            ee.Initialize(project=project_id)
+            print(f"✅ GEE initialized: {project_id}")
+        except Exception as exc:
+            print("❌ GEE initialization failed.")
+            raise
+
+        raw = pd.read_csv(gauge_csv)
+        missing = {col_station, col_lat, col_lon} - set(raw.columns)
+        if missing:
+            raise ValueError(f"CSV is missing columns: {sorted(missing)}")
+
+        raw = raw.rename(columns={col_station: "station_id"})
+        raw["station_id"] = raw["station_id"].astype(str)
+        raw["lon"] = pd.to_numeric(raw[col_lon], errors="raise").astype(float)
+        raw["lat"] = pd.to_numeric(raw[col_lat], errors="raise").astype(float)
+
+        self.station_table = raw[["station_id", "lon", "lat"]].copy()
+        gdf = gpd.GeoDataFrame(
+            self.station_table,
+            geometry=gpd.points_from_xy(self.station_table.lon, self.station_table.lat),
+            crs="EPSG:4326",
+        )
+        self.gee_points = ee.FeatureCollection(gdf.__geo_interface__)
+        
+        self._xy_to_id = {
+            (round(float(r.lon), 5), round(float(r.lat), 5)): r.station_id
+            for r in self.station_table.itertuples(index=False)
+        }
+
+    def _scale_for(self, meta: dict) -> int:
+        return meta["native_scale"] if self.sampling == "native" else self.master_scale
+
+    def _year_stack(self, meta: dict, year: int):
+        ic = (ee.ImageCollection(meta["asset"]).filterDate(self.start_date, self.end_date).select(meta["band"]))
+        if meta["factor"] != 1.0:
+            factor = meta["factor"]
+            ic = ic.map(lambda img: img.multiply(factor).copyProperties(img, ["system:time_start"]))
+
+        bands, months = [], []
+        for month in range(1, 13):
+            m_start, m_end = _month_bounds(year, month)
+            if m_start < self.start_dt.replace(day=1) or m_start > self.end_dt:
+                continue
+            monthly = ic.filterDate(m_start, m_end).sum().rename(f"m{month:02d}")
+            bands.append(monthly)
+            months.append(pd.Timestamp(m_start))
+        if not bands: return None, []
+        return ee.Image.cat(bands), months
+
+    def _sample_stack(self, stack, months, var_name: str, scale: int) -> pd.DataFrame:
+        expected = [f"m{m.month:02d}" for m in months]
+        actual = stack.bandNames().getInfo()
+        if actual != expected:
+            raise RuntimeError(f"[{var_name}] Band-name mismatch.")
+
+        features = stack.reduceRegions(
+            collection=self.gee_points, reducer=ee.Reducer.mean(), scale=scale, crs="EPSG:4326"
+        ).getInfo().get("features", [])
+
+        records = []
+        for feat in features:
+            props = feat.get("properties", {})
+            xy = tuple(round(float(v), 5) for v in feat["geometry"]["coordinates"][:2])
+            sid = props.get("station_id") or self._xy_to_id.get(xy)
+            if sid is None: raise RuntimeError(f"[{var_name}] Could not identify feature: {xy}")
+
+            for ts in months:
+                value = props.get(f"m{ts.month:02d}")
+                if var_name == "pet" and value is not None: value = abs(value)
+                records.append({"station_id": sid, "date": ts, var_name: value})
+        return pd.DataFrame(records)
+
+    def _extract_product(self, meta: dict, var_name: str) -> pd.DataFrame:
+        scale = self._scale_for(meta)
+        print(f"  → {var_name} | {meta['asset']} | scale={scale} m")
+        pieces = []
+        for year in range(self.start_dt.year, self.end_dt.year + 1):
+            stack, months = self._year_stack(meta, year)
+            if stack is None: continue
+            df = self._sample_stack(stack, months, var_name, scale)
+            pieces.append(df)
+        if not pieces: raise ValueError(f"[{var_name}] No months in range.")
+        
+        df = pd.concat(pieces, ignore_index=True).drop_duplicates(["station_id", "date"], keep="last")
+        idx = pd.date_range(df["date"].min(), df["date"].max(), freq="MS")
+        full = pd.MultiIndex.from_product([sorted(df["station_id"].unique()), idx], names=["station_id", "date"])
+        return df.set_index(["station_id", "date"]).reindex(full).reset_index()
+
+    def extract_static(self, asset_id, band_name, var_name="elev_m", reducer="mean", scale=None):
+        if scale is None: scale = self.master_scale
+        print(f"  → {var_name} (using {reducer} reducer at {scale}m scale)")
+        if "MCD12Q1" in asset_id:
+            img = ee.ImageCollection(asset_id).sort('system:time_start', False).first().select(band_name).rename(var_name)
+        else:
+            img = ee.Image(asset_id).select(band_name).rename(var_name)
+        
+        red_func = ee.Reducer.mode().setOutputs([var_name]) if reducer == "mode" else ee.Reducer.mean().setOutputs([var_name])
+        features = img.reduceRegions(collection=self.gee_points, reducer=red_func, scale=scale).getInfo()["features"]
+        
+        rows = []
+        for feat in features:
+            props = feat.get("properties", {})
+            sid = props.get("station_id")
+            if not sid:
+                xy = tuple(round(float(v), 5) for v in feat["geometry"]["coordinates"][:2])
+                sid = self._xy_to_id.get(xy, "unknown")
+            rows.append({"station_id": sid, var_name: props.get(var_name)})
+        return pd.DataFrame(rows)
+
+    def run_pipeline(self, spe_list, pet_product, dem_product, lulc_product, output_path):
+        print(f"\n🚀 HydroSampler | {self.start_date} → {self.end_date}")
+        frames = []
+        for spe in spe_list:
+            frames.append(self._extract_product(SPE_METADATA[spe], f"precip_{spe.lower()}"))
+        frames.append(self._extract_product(PET_METADATA[pet_product], "pet"))
+
+        merged = frames[0]
+        for frame in frames[1:]:
+            merged = merged.merge(frame, on=["station_id", "date"], how="outer", validate="one_to_one")
+
+        dem = self.extract_static(DEM_METADATA[dem_product]["asset"], DEM_METADATA[dem_product]["band"], var_name="elev_m", reducer="mean", scale=DEM_METADATA[dem_product]["native_scale"])
+        merged = merged.merge(dem, on="station_id", how="left")
+
+        lulc = self.extract_static(LULC_METADATA[lulc_product]["asset"], LULC_METADATA[lulc_product]["band"], var_name="lulc_class", reducer="mode", scale=LULC_METADATA[lulc_product]["native_scale"])
+        merged = merged.merge(lulc, on="station_id", how="left")
+        merged = merged.merge(self.station_table, on="station_id", how="left", validate="many_to_one")
+
+        out = Path(output_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        merged.to_parquet(out, compression="snappy", index=False)
+        print(f"✅ SUCCESS! Saved to: {out}")
+        return merged
+
+
+# ==============================================================================
+# CMIP6 FUTURE PROJECTION EXTENSION (WITH HARGREAVES-SAMANI PET)
+# ==============================================================================
+
+CMIP6_METADATA = {
+    "GDDP": {
+        "asset": "NASA/GDDP-CMIP6",
+        "bands": {
+            "pr": {"unit": "kg_m-2_s-1", "conversion": "precip"},
+            "tasmax": {"unit": "K", "conversion": "temp"},
+            "tasmin": {"unit": "K", "conversion": "temp"}
+        }
+    }
+}
+
+class CMIP6Sampler(HydroSampler):
+    def __init__(self, gauge_csv, col_station, col_lat, col_lon, 
+                 start_date, end_date, project_id, 
+                 scenario="ssp585", model="ACCESS-CM2", master_scale=27830):
+        super().__init__(gauge_csv, col_station, col_lat, col_lon, 
+                         start_date, end_date, project_id, 
+                         master_scale=master_scale, sampling="native")
+        self.scenario = scenario
+        self.model = model
+        print(f"✅ CMIP6 Sampler initialized: Scenario='{scenario}' | Model='{model}'")
+
+    def _get_cmip6_collection(self, band_name):
+        return (ee.ImageCollection(CMIP6_METADATA["GDDP"]["asset"])
+                .filter(ee.Filter.eq('scenario', self.scenario))
+                .filter(ee.Filter.eq('model', self.model))
+                .filterDate(self.start_date, self.end_date)
+                .select(band_name))
+
+    def _cmip6_year_stack(self, band_name, conversion_type, year):
+        ic = self._get_cmip6_collection(band_name)
+        bands, months = [], []
+        
+        for month in range(1, 13):
+            m_start, m_end = _month_bounds(year, month)
+            if m_start < self.start_dt or m_start > self.end_dt: 
+                continue
+            
+            monthly_ic = ic.filterDate(m_start, m_end)
+            
+            if conversion_type == "precip":
+                monthly_img = monthly_ic.map(
+                    lambda img: img.multiply(86400).copyProperties(img, ["system:time_start"])
+                ).sum().rename(f"m{month:02d}")
+            elif conversion_type == "temp":
+                monthly_img = monthly_ic.map(
+                    lambda img: img.subtract(273.15).copyProperties(img, ["system:time_start"])
+                ).mean().rename(f"m{month:02d}")
+                
+            bands.append(monthly_img)
+            months.append(pd.Timestamp(m_start))
+            
+        if not bands: 
+            return None, []
+        return ee.Image.cat(bands), months
+
+    @staticmethod
+    def _calculate_hargreaves_pet(row):
+        tasmax = row['tasmax']
+        tasmin = row['tasmin']
+        lat_rad = np.radians(row['lat'])
+        J = row['date'].dayofyear 
+        
+        Gsc = 0.0820
+        dr = 1 + 0.033 * np.cos(2 * np.pi * J / 365)
+        delta = 0.409 * np.sin(2 * np.pi * J / 365 - 1.39)
+        ws = np.arccos(-np.tan(lat_rad) * np.tan(delta))
+        
+        Ra = (24 * 60 / np.pi) * Gsc * dr * (ws * np.sin(lat_rad) * np.sin(delta) + np.cos(lat_rad) * np.cos(delta) * np.sin(ws))
+        
+        temp_diff = np.clip(tasmax - tasmin, 0, None)
+        tmean = (tasmax + tasmin) / 2.0
+        
+        pet_daily = 0.0023 * Ra * (tmean + 17.8) * np.sqrt(temp_diff)
+        
+        days_in_month = row['date'].days_in_month
+        return pet_daily * days_in_month
+
+    def extract_future_climate(self, output_path):
+        print(f"\n🚀 CMIP6 Extraction | Scenario: {self.scenario} | Model: {self.model}")
+        print("-" * 60)
+        
+        pieces_pr = []
+        pieces_temp = []
+        
+        for year in range(self.start_dt.year, self.end_dt.year + 1):
+            print(f"  -> Processing year {year}...")
+            
+            pr_stack, pr_months = self._cmip6_year_stack("pr", "precip", year)
+            if pr_stack:
+                pr_df = self._sample_stack(pr_stack, pr_months, "P_future", 27830)
+                pieces_pr.append(pr_df)
+                
+            tasmax_stack, tasmax_months = self._cmip6_year_stack("tasmax", "temp", year)
+            tasmin_stack, tasmin_months = self._cmip6_year_stack("tasmin", "temp", year)
+            
+            if tasmax_stack and tasmin_stack:
+                tasmax_df = self._sample_stack(tasmax_stack, tasmax_months, "tasmax", 27830)
+                tasmin_df = self._sample_stack(tasmin_stack, tasmin_months, "tasmin", 27830)
+                
+                temp_df = tasmax_df.merge(tasmin_df, on=["station_id", "date"], how="inner")
+                temp_df["T_mean_future"] = (temp_df["tasmax"] + temp_df["tasmin"]) / 2.0
+                pieces_temp.append(temp_df[["station_id", "date", "tasmax", "tasmin"]])
+                
+        if not pieces_pr:
+            raise ValueError("No CMIP6 data extracted.")
+            
+        print("  -> Combining yearly data and calculating Hargreaves-Samani PET...")
+        pr_final = pd.concat(pieces_pr, ignore_index=True)
+        temp_final = pd.concat(pieces_temp, ignore_index=True) if pieces_temp else None
+        
+        merged = pr_final
+        if temp_final is not None:
+            merged = merged.merge(temp_final, on=["station_id", "date"], how="outer")
+            
+        merged = merged.merge(self.station_table, on="station_id", how="left")
+        
+        if 'tasmax' in merged.columns and 'tasmin' in merged.columns:
+            merged['PET_future'] = merged.apply(self._calculate_hargreaves_pet, axis=1)
+            merged = merged.drop(columns=['tasmax', 'tasmin'])
+            
+        merged['scenario'] = self.scenario
+        merged['model'] = self.model
+        
+        out = Path(output_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        merged.to_parquet(out, compression="snappy", index=False)
+        
+        print("-" * 60)
+        print(f"✅ SUCCESS! Saved CMIP6 Future Data (with Hargreaves PET) to: {out}")
+        print(f"   Shape: {merged.shape[0]} rows × {merged.shape[1]} columns")
+        
+        return merged
+
+
+==================================================
+FILE: insitu_utils.py
+==================================================
+
+# src/insitu_utils.py
+import pandas as pd
+from pathlib import Path
+
+def load_insitu_data(csv_path):
+    """
+    Intelligently loads and standardizes in-situ gauge data.
+    Handles unnamed precipitation columns and standardizes station IDs and names.
+    """
+    df = pd.read_csv(csv_path)
+    
+    # 1. Standardize Station ID column
+    if 'station_no' in df.columns:
+        df = df.rename(columns={'station_no': 'station_id'})
+    elif 'station_id' not in df.columns:
+        df = df.rename(columns={df.columns[0]: 'station_id'})
+
+    # Extract station name if available
+    cols_to_keep = ["station_id", "date"]
+    
+    if 'station_name' in df.columns:
+        cols_to_keep.append('station_name')
+        
+    # 2. Standardize Precipitation column
+    if 'precipitation_sum' in df.columns:
+        df = df.rename(columns={'precipitation_sum': 'Gauge_Observed'})
+    elif 'Gauge_Observed' in df.columns:
+        pass # Already correct
+    elif 'precip_insitu' in df.columns:
+        df = df.rename(columns={'precip_insitu': 'Gauge_Observed'})
+    else:
+        last_col = df.columns[-1]
+        df = df.rename(columns={last_col: 'Gauge_Observed'})
+        print(f"  ℹ️ Renamed unnamed column '{last_col}' to 'Gauge_Observed'")
+        
+    cols_to_keep.append("Gauge_Observed")
+
+    # 3. Clean data types
+    df["station_id"] = df["station_id"].astype(str).str.strip()
+    df["date"] = pd.to_datetime(df["date"])
+    df["Gauge_Observed"] = pd.to_numeric(df["Gauge_Observed"], errors="coerce")
+    
+    # 4. Ensure we only return the necessary columns
+    return df[cols_to_keep]
+
+def inject_insitu_into_master(master_parquet_path, insitu_csv_path, gauge_metadata_path, output_parquet_path):
+    """
+    Merges in-situ data and station names into the master parquet file.
+    """
+    print(f"🔄 Loading master data from {master_parquet_path}...")
+    master_df = pd.read_parquet(master_parquet_path)
+    master_df["station_id"] = master_df["station_id"].astype(str).str.strip()
+    master_df["date"] = pd.to_datetime(master_df["date"])
+    
+    print(f"🔄 Loading in-situ data from {insitu_csv_path}...")
+    insitu_df = load_insitu_data(insitu_csv_path)
+
+    # Bring in the station names from the gauge metadata if they aren't in the insitu data
+    if 'station_name' not in insitu_df.columns:
+        print(f"🔄 Loading gauge metadata from {gauge_metadata_path}...")
+        meta_df = pd.read_csv(gauge_metadata_path)
+        meta_df["station_id"] = meta_df["station_id"].astype(str).str.strip()
+        
+        # Merge names into the master file
+        master_df = master_df.merge(meta_df[['station_id', 'station_name']], on='station_id', how='left')
+    
+    print("🔄 Merging datasets on ['station_id', 'date']...")
+    
+    # LEFT JOIN: Preserves all master rows
+    merged_df = master_df.merge(insitu_df, on=["station_id", "date"], how="left")
+    
+    # Reorder columns to put station_name right after station_id
+    cols = merged_df.columns.tolist()
+    if 'station_name' in cols:
+        cols.insert(1, cols.pop(cols.index('station_name')))
+        merged_df = merged_df[cols]
+    
+    merged_df = merged_df.sort_values(["station_id", "date"]).reset_index(drop=True)
+    
+    out_path = Path(output_parquet_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    merged_df.to_parquet(out_path, compression="snappy", index=False)
+    
+    print("-" * 60)
+    print(f"✅ SUCCESS! Saved master dataset to: {out_path}")
+    print(f"   Shape: {merged_df.shape[0]} rows × {merged_df.shape[1]} columns")
+    
+    valid_insitu = merged_df["Gauge_Observed"].notna().sum()
+    total_rows = len(merged_df)
+    print(f"   Gauge_Observed: {valid_insitu:6d} valid / {total_rows} ({100 * valid_insitu / total_rows:5.1f}%)")
+    
+    return merged_df
+
+
+==================================================
+FILE: ml_bias_correction.py
+==================================================
+
+# src/ml_bias_correction.py
+import pandas as pd
+import numpy as np
+from pathlib import Path
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.svm import SVR
+from sklearn.neural_network import MLPRegressor
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.preprocessing import StandardScaler
+import joblib
+import warnings
+warnings.filterwarnings('ignore')
+
+class MLBiasCorrector:
+    """
+    Multi-Model Machine Learning Bias Correction Engine.
+    Evaluates multiple algorithms across all P_merged variants to find the 
+    optimal fusion-correction pipeline.
+    """
+
+    def __init__(self, input_parquet_path):
+        print("🔄 Loading TCA-fused dataset for ML Bias Correction...")
+        self.df = pd.read_parquet(input_parquet_path)
+        self.df['date'] = pd.to_datetime(self.df['date'])
+        self.df['year'] = self.df['date'].dt.year
+        self.df['month'] = self.df['date'].dt.month
+        
+        # Define the 4 P_merged variants to test
+        self.p_merged_cols = [
+            'P_merged_global', 'P_merged_season', 
+            'P_merged_elev', 'P_merged_hier'
+        ]
+        
+        print(f"✅ Loaded {len(self.df)} rows. Testing {len(self.p_merged_cols)} fusion variants.")
+
+    def _prepare_features(self, p_col):
+        """Engineers features and calculates residual bias for a specific P_merged."""
+        df = self.df.copy()
+        
+        # Target: Residual Bias (Gauge - P_merged). 
+        # If positive, satellite underestimated. If negative, satellite overestimated.
+        df['residual_bias'] = df['Gauge_Observed'] - df[p_col]
+        
+        # Features: Physical covariates + Satellite signals
+        # We include the raw SPEs so the ML model can learn magnitude-dependent biases
+        feature_cols = [
+            'elev_m', 'lulc_class', 'month',
+            'precip_chirps', 'precip_era5_land', 'precip_persiann', p_col
+        ]
+        
+        # Encode LULC
+        df['lulc_code'] = pd.Categorical(df['lulc_class']).codes
+        feature_cols[1] = 'lulc_code'
+        
+        # Drop NaNs
+        valid_mask = df[feature_cols + ['residual_bias']].notna().all(axis=1)
+        df_valid = df[valid_mask].copy()
+        
+        return df_valid, feature_cols
+
+    def train_and_evaluate_all(self, output_parquet_path):
+        """Trains multiple models on all P_merged variants and selects the best."""
+        
+        # Define the models to test (The "MATLAB" equivalents)
+        models = {
+            'Linear Regression': LinearRegression(),
+            'Random Forest': RandomForestRegressor(n_estimators=100, max_depth=10, random_state=42, n_jobs=-1),
+            'Gradient Boosting': GradientBoostingRegressor(n_estimators=100, max_depth=5, learning_rate=0.1, random_state=42),
+            'Neural Network (MLP)': MLPRegressor(hidden_layer_sizes=(50, 20), max_iter=1000, random_state=42)
+        }
+        
+        results = []
+        best_overall_score = -999
+        best_config = None
+        
+        # 1. Loop through Fusion Variants
+        for p_col in self.p_merged_cols:
+            print(f"\n🚀 Evaluating Fusion Variant: {p_col}")
+            df_valid, feature_cols = self._prepare_features(p_col)
+            
+            X = df_valid[feature_cols].values
+            y = df_valid['residual_bias'].values
+            
+            # 2. Chronological Split (80% Train / 20% Test)
+            # Sort by date first to ensure no future data leaks into training
+            df_valid = df_valid.sort_values('date')
+            split_idx = int(len(df_valid) * 0.8)
+            
+            X_train, X_test = X[:split_idx], X[split_idx:]
+            y_train, y_test = y[:split_idx], y[split_idx:]
+            
+            # Scale features (Crucial for SVR, MLP, and Linear Regression)
+            scaler = StandardScaler()
+            X_train_scaled = scaler.fit_transform(X_train)
+            X_test_scaled = scaler.transform(X_test)
+            
+            # 3. Loop through ML Models
+            for model_name, model in models.items():
+                print(f"   -> Training {model_name}...")
+                
+                # Train
+                if model_name in ['Linear Regression', 'Random Forest', 'Gradient Boosting']:
+                    model.fit(X_train, y_train) # Tree/Linear models don't strictly need scaling, but it's safe
+                    y_pred = model.predict(X_test)
+                else:
+                    model.fit(X_train_scaled, y_train) # NN/SVR need scaling
+                    y_pred = model.predict(X_test_scaled)
+                
+                # Evaluate
+                rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+                r2 = r2_score(y_test, y_pred)
+                
+                # Calculate KGE (Kling-Gupta Efficiency)
+                r_kge = np.corrcoef(y_test, y_pred)[0, 1]
+                alpha = np.std(y_pred) / np.std(y_test)
+                beta = np.mean(y_pred) / np.mean(y_test)
+                kge = 1 - np.sqrt((r_kge - 1)**2 + (alpha - 1)**2 + (beta - 1)**2)
+                
+                # Composite Score (Higher is better. We want high KGE/R2, low RMSE)
+                # Normalized roughly for comparison
+                score = (kge + r2) / 2 - (rmse / 1000) 
+                
+                results.append({
+                    'Fusion_Method': p_col.replace('P_merged_', '').title(),
+                    'ML_Model': model_name,
+                    'RMSE': rmse,
+                    'R2': r2,
+                    'KGE': kge,
+                    'Composite_Score': score
+                })
+                
+                if score > best_overall_score:
+                    best_overall_score = score
+                    best_config = {
+                        'fusion': p_col,
+                        'model_name': model_name,
+                        'model_obj': model,
+                        'scaler': scaler,
+                        'feature_cols': feature_cols
+                    }
+
+        # 4. Generate Leaderboard
+        results_df = pd.DataFrame(results).sort_values('Composite_Score', ascending=False)
+        print("\n" + "="*60)
+        print("🏆 ML MODEL LEADERBOARD (Ranked by Composite Score)")
+        print("="*60)
+        print(results_df[['Fusion_Method', 'ML_Model', 'RMSE', 'R2', 'KGE']].to_string(index=False))
+        print("="*60)
+        
+        # 5. Apply the BEST model to the full dataset
+        print(f"\n🌟 WINNING CONFIG: {best_config['fusion']} + {best_config['model_name']}")
+        print("🔄 Applying best model to full historical dataset...")
+        
+        df_full = self.df.copy()
+        df_full, feat_cols = self._prepare_features(best_config['fusion'])
+        
+        X_full = df_full[feat_cols].values
+        if best_config['model_name'] in ['Neural Network (MLP)']:
+            X_full_scaled = best_config['scaler'].transform(X_full)
+            predicted_bias = best_config['model_obj'].predict(X_full_scaled)
+        else:
+            predicted_bias = best_config['model_obj'].predict(X_full)
+            
+        # Correct the P_merged
+        df_full['P_corrected'] = df_full[best_config['fusion']] + predicted_bias
+        df_full['P_corrected'] = df_full['P_corrected'].clip(lower=0) # Rain can't be negative
+        
+        # Save
+        out_path = Path(output_parquet_path)
+        df_full.to_parquet(out_path, compression='snappy', index=False)
+        
+        # Save the winning model and scaler for future use (e.g., CMIP6, XAI)
+        model_path = out_path.parent / "best_ml_model.pkl"
+        joblib.dump(best_config['model_obj'], model_path)
+        joblib.dump(best_config['scaler'], out_path.parent / "scaler.pkl")
+        
+        print(f"💾 Saved corrected dataset to: {out_path}")
+        print(f"💾 Saved winning model to: {model_path}")
+        
+        return results_df, df_full
+
+
+==================================================
+FILE: spi_indices.py
+==================================================
+
+
+
+
+==================================================
+FILE: tca_math.py
+==================================================
+
+# src/tca_math.py
+import pandas as pd
+import numpy as np
+from pathlib import Path
+import warnings
+
+class HierarchicalTCAFuser:
+    """
+    Hierarchical Triple Collocation Analysis (TCA) Engine.
+    
+    Scientific Rationale:
+    ---------------------
+    1. Multiplicative TCA: Precipitation is strictly positive and highly skewed.
+       We apply natural log transformation (ln(X)) to stabilize variance before
+       calculating error covariances (McColl et al., 2014).
+    2. Hierarchical Stratification: Satellite error is non-stationary. We calculate
+       local error variances stratified by Season (NEM, SWM, Inter) and Elevation
+       Quartiles (Q1-Q4) to capture spatiotemporal error dynamics.
+    3. Inverse Variance Weighting (IVW): Products with lower error variance receive
+       higher weight in the fused product.
+    4. Fallback Logic: If a specific stratum (e.g., NEM x Q4) has < 30 data points,
+       the engine automatically falls back to the broader Season stratum, and 
+       finally to the Global stratum to ensure mathematical stability.
+    """
+
+    def __init__(self, input_parquet_path):
+        print("🔄 Loading master dataset for TCA...")
+        self.df = pd.read_parquet(input_parquet_path)
+        self.df['date'] = pd.to_datetime(self.df['date'])
+        self.df['month'] = self.df['date'].dt.month
+        
+        # 1. Define Seasons (Sarawak Monsoon Context)
+        def get_season(m):
+            if m in [11, 12, 1, 2, 3]: return 'NEM'
+            elif m in [5, 6, 7, 8, 9]: return 'SWM'
+            else: return 'Inter-Monsoon'
+        self.df['season'] = self.df['month'].apply(get_season)
+        
+        # 2. Define Elevation Quartiles (Q1=Lowest, Q4=Highest)
+        # We use qcut to ensure equal number of stations per quartile
+        self.df['elev_bin'], bins = pd.qcut(self.df['elev_m'], q=4, 
+                                            labels=['Q1', 'Q2', 'Q3', 'Q4'], 
+                                            retbins=True, duplicates='drop')
+        self.df['elev_bin'] = self.df['elev_bin'].astype(str)
+        
+        # 3. Create Hierarchical Stratum Key
+        self.df['stratum_hier'] = self.df['season'] + '_' + self.df['elev_bin']
+        
+        print(f"✅ Data loaded: {len(self.df)} rows, {self.df['station_id'].nunique()} stations.")
+        print(f"   Seasons: {self.df['season'].unique()}")
+        print(f"   Elevation Bins: {self.df['elev_bin'].unique()}")
+
+    @staticmethod
+    def _calculate_tca_weights(x, y, z):
+        """
+        Core TCA Math (Multiplicative/Log-Space).
+        Returns weights and error variances for X, Y, Z.
+        """
+        # Log transform
+        x_l, y_l, z_l = np.log(x), np.log(y), np.log(z)
+        
+        # Covariances
+        cov_xy = np.cov(x_l, y_l, ddof=1)[0, 1]
+        cov_xz = np.cov(x_l, z_l, ddof=1)[0, 1]
+        cov_yz = np.cov(y_l, z_l, ddof=1)[0, 1]
+        
+        # Variances
+        var_x = np.var(x_l, ddof=1)
+        var_y = np.var(y_l, ddof=1)
+        var_z = np.var(z_l, ddof=1)
+        
+        # Error Variances (McColl et al., 2014 Eq 3)
+        # Add small epsilon to prevent division by zero if covariance is 0
+        eps = 1e-9
+        ev_x = var_x - (cov_xy * cov_xz) / max(cov_yz, eps)
+        ev_y = var_y - (cov_xy * cov_yz) / max(cov_xz, eps)
+        ev_z = var_z - (cov_xz * cov_yz) / max(cov_xy, eps)
+        
+        # Handle negative error variances (violates TCA assumptions)
+        # Fallback: set to small positive value
+        if ev_x <= 0: ev_x = eps
+        if ev_y <= 0: ev_y = eps
+        if ev_z <= 0: ev_z = eps
+        
+        # Inverse Variance Weights (Normalized to sum to 1)
+        inv_x, inv_y, inv_z = 1/ev_x, 1/ev_y, 1/ev_z
+        total_inv = inv_x + inv_y + inv_z
+        
+        w_x = inv_x / total_inv
+        w_y = inv_y / total_inv
+        w_z = inv_z / total_inv
+        
+        return w_x, w_y, w_z, ev_x, ev_y, ev_z
+
+    def _get_weights_for_stratum(self, data_subset, min_samples=30):
+        """Calculate weights for a subset, returning None if too few samples."""
+        # Strict wet days filter (all 3 SPEs > 0) for log transform
+        valid = data_subset[
+            (data_subset['precip_chirps'] > 0) & 
+            (data_subset['precip_era5_land'] > 0) & 
+            (data_subset['precip_persiann'] > 0)
+        ]
+        
+        if len(valid) < min_samples:
+            return None
+            
+        x = valid['precip_chirps'].values
+        y = valid['precip_persiann'].values
+        z = valid['precip_era5_land'].values
+        
+        return self._calculate_tca_weights(x, y, z)
+
+    def run_fusion(self, output_parquet_path):
+        """
+        Execute Hierarchical TCA and generate 4 P_merged columns.
+        """
+        print("\n Starting Hierarchical TCA Fusion...")
+        
+        # 1. Calculate Global Weights
+        print("   -> Calculating Global weights...")
+        global_weights = self._get_weights_for_stratum(self.df, min_samples=100)
+        if global_weights is None:
+            raise ValueError("Not enough global data for TCA.")
+        gw_c, gw_p, gw_e = global_weights[0], global_weights[1], global_weights[2]
+        
+        # 2. Calculate Seasonal Weights
+        print("   -> Calculating Seasonal weights...")
+        season_weights = {}
+        for season in self.df['season'].unique():
+            sub = self.df[self.df['season'] == season]
+            w = self._get_weights_for_stratum(sub)
+            if w: season_weights[season] = w
+        
+        # 3. Calculate Elevation Weights
+        print("   -> Calculating Elevation weights...")
+        elev_weights = {}
+        for eb in self.df['elev_bin'].unique():
+            sub = self.df[self.df['elev_bin'] == eb]
+            w = self._get_weights_for_stratum(sub)
+            if w: elev_weights[eb] = w
+            
+        # 4. Calculate Hierarchical Weights (Season x Elevation)
+        print("   -> Calculating Hierarchical weights (Season x Elevation)...")
+        hier_weights = {}
+        for sh in self.df['stratum_hier'].unique():
+            sub = self.df[self.df['stratum_hier'] == sh]
+            w = self._get_weights_for_stratum(sub, min_samples=30)
+            if w: hier_weights[sh] = w
+            
+        # 5. Map Weights and Calculate P_merged
+        print("   -> Mapping weights and calculating P_merged products...")
+        
+        # Initialize columns
+        self.df['P_merged_global'] = np.nan
+        self.df['P_merged_season'] = np.nan
+        self.df['P_merged_elev'] = np.nan
+        self.df['P_merged_hier'] = np.nan
+        
+        # Log transform main data (handle zeros by adding tiny epsilon for log, but mask later)
+        # Actually, we only calculate P_merged where all 3 > 0 to avoid log(0)
+        valid_mask = (
+            (self.df['precip_chirps'] > 0) & 
+            (self.df['precip_era5_land'] > 0) & 
+            (self.df['precip_persiann'] > 0)
+        )
+        
+        log_c = np.log(self.df.loc[valid_mask, 'precip_chirps'])
+        log_p = np.log(self.df.loc[valid_mask, 'precip_persiann'])
+        log_e = np.log(self.df.loc[valid_mask, 'precip_era5_land'])
+        
+        # Global
+        self.df.loc[valid_mask, 'P_merged_global'] = np.exp(
+            gw_c * log_c + gw_p * log_p + gw_e * log_e
+        )
+        
+        # Season, Elev, Hier (with fallback logic)
+        for idx in self.df[valid_mask].index:
+            row = self.df.loc[idx]
+            s, eb, sh = row['season'], row['elev_bin'], row['stratum_hier']
+            
+            # Season
+            w_s = season_weights.get(s, global_weights)
+            self.df.loc[idx, 'P_merged_season'] = np.exp(w_s[0]*log_c[idx] + w_s[1]*log_p[idx] + w_s[2]*log_e[idx])
+            
+            # Elevation
+            w_eb = elev_weights.get(eb, global_weights)
+            self.df.loc[idx, 'P_merged_elev'] = np.exp(w_eb[0]*log_c[idx] + w_eb[1]*log_p[idx] + w_eb[2]*log_e[idx])
+            
+            # Hierarchical (Fallback: Hier -> Season -> Global)
+            w_h = hier_weights.get(sh, season_weights.get(s, global_weights))
+            self.df.loc[idx, 'P_merged_hier'] = np.exp(w_h[0]*log_c[idx] + w_h[1]*log_p[idx] + w_h[2]*log_e[idx])
+            
+        # 6. Save Output
+        out_path = Path(output_parquet_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        self.df.to_parquet(out_path, compression='snappy', index=False)
+        
+        print(f"\n✅ SUCCESS! Saved TCA-fused dataset to: {out_path}")
+        print(f"   Shape: {self.df.shape[0]} rows × {self.df.shape[1]} columns")
+        
+        # Print Summary of Weights
+        print("\n📊 TCA Weight Summary (Multiplicative Model):")
+        print(f"   Global: CHIRPS={gw_c:.3f}, PERSIANN={gw_p:.3f}, ERA5={gw_e:.3f}")
+        for s, w in season_weights.items():
+            print(f"   {s}: CHIRPS={w[0]:.3f}, PERSIANN={w[1]:.3f}, ERA5={w[2]:.3f}")
+            
+        return self.df
+
+
+==================================================
+FILE: xai_explainer.py
+==================================================
+
+import pandas as pd
+import numpy as np
+import shap
+import joblib
+from pathlib import Path
+import warnings
+warnings.filterwarnings('ignore')
+
+class SHAPExplainer:
+    def __init__(self, parquet_path, model_dir):
+        self.parquet_path = Path(parquet_path)
+        self.model_dir = Path(model_dir)
+        
+        # Load the default best model
+        model_path = self.model_dir / "best_ml_model.pkl"
+        self.model = joblib.load(model_path)
+        self.model_type = type(self.model).__name__
+        
+        print(f" Loaded model type: {self.model_type}")
+        
+        # Load the data
+        df = pd.read_parquet(self.parquet_path)
+        
+        # CRITICAL FIX: Recreate lulc_code
+        if 'lulc_class' in df.columns:
+            df['lulc_code'] = pd.Categorical(df['lulc_class']).codes
+        elif 'lulc_code' not in df.columns:
+            raise ValueError("Neither 'lulc_class' nor 'lulc_code' found in data.")
+            
+        self.feature_cols = [
+            'elev_m', 'lulc_code', 'month', 
+            'precip_chirps', 'precip_era5_land', 'precip_persiann', 'P_merged_hier'
+        ]
+        
+        required_cols = self.feature_cols + ['Gauge_Observed']
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            raise ValueError(f"Missing required columns: {missing_cols}")
+            
+        self.df_valid = df.dropna(subset=required_cols).copy()
+        print(f"✅ Data loaded. {len(self.df_valid)} valid samples available.")
+
+    def compute_shap_values(self, sample_size=2000):
+        if len(self.df_valid) > sample_size:
+            X_sample = self.df_valid.sample(sample_size, random_state=42)[self.feature_cols]
+            original_sample_df = self.df_valid.sample(sample_size, random_state=42).copy()
+        else:
+            X_sample = self.df_valid[self.feature_cols].copy()
+            original_sample_df = self.df_valid.copy()
+            
+        print(f"🧮 Computing SHAP for {self.model_type} (n={len(X_sample)})...")
+        
+        try:
+            if self.model_type in ['RandomForestRegressor', 'GradientBoostingRegressor', 'ExtraTreesRegressor', 'HistGradientBoostingRegressor']:
+                print("   → Using TreeExplainer (optimized for tree-based models)")
+                self.explainer = shap.TreeExplainer(self.model)
+                shap_values = self.explainer.shap_values(X_sample)
+            elif self.model_type == 'MLPRegressor':
+                print("   → Using PermutationExplainer (for MLP neural network)")
+                print("   ️ This may take a few minutes...")
+                try:
+                    self.explainer = shap.PermutationExplainer(self.model, X_sample, nsamples=50)
+                    shap_values = self.explainer.shap_values(X_sample)
+                except (AttributeError, TypeError) as e:
+                    print(f"   → PermutationExplainer failed: {e}")
+                    print("   → Falling back to KernelExplainer")
+                    background = X_sample.sample(min(100, len(X_sample)))
+                    self.explainer = shap.KernelExplainer(self.model.predict, background)
+                    shap_values = self.explainer.shap_values(X_sample)
+            else:
+                print(f"   → Using KernelExplainer (fallback for {self.model_type})")
+                background = X_sample.sample(min(100, len(X_sample)))
+                self.explainer = shap.KernelExplainer(self.model.predict, background)
+                shap_values = self.explainer.shap_values(X_sample)
+        except Exception as e:
+            print(f"❌ Error computing SHAP values: {e}")
+            raise
+            
+        print("✅ SHAP values computed successfully.")
+        return shap_values, X_sample, original_sample_df
+
+    def get_global_importance(self, shap_values):
+        if isinstance(shap_values, list):
+            shap_vals = np.array(shap_values[0])
+        elif hasattr(shap_values, 'values'):
+            shap_vals = np.array(shap_values.values)
+        else:
+            shap_vals = np.array(shap_values)
+        
+        mean_abs_shap = np.abs(shap_vals).mean(axis=0)
+        display_names = [col.replace('lulc_code', 'LULC Class') for col in self.feature_cols]
+        
+        return pd.DataFrame({
+            'Feature': display_names,
+            'Mean |SHAP|': mean_abs_shap
+        }).sort_values('Mean |SHAP|', ascending=True)
+
+    def get_beeswarm_data(self, shap_values, X_sample, original_sample_df):
+        if isinstance(shap_values, list):
+            shap_vals = np.array(shap_values[0])
+        elif hasattr(shap_values, 'values'):
+            shap_vals = np.array(shap_values.values)
+        else:
+            shap_vals = np.array(shap_values)
+        
+        n_samples, n_features = shap_vals.shape
+        display_names = [col.replace('lulc_code', 'LULC Class') for col in self.feature_cols]
+        
+        features_flat = []
+        shap_vals_flat = []
+        feature_vals_flat = []
+        months_flat = []
+        
+        for i in range(n_features):
+            features_flat.extend([display_names[i]] * n_samples)
+            shap_vals_flat.extend(shap_vals[:, i])
+            feature_vals_flat.extend(X_sample.iloc[:, i])
+            months_flat.extend(original_sample_df['month'].values)
+            
+        beeswarm_df = pd.DataFrame({
+            'Feature': features_flat,
+            'SHAP Value': shap_vals_flat,
+            'Feature Value': feature_vals_flat,
+            'Month': months_flat
+        })
+        
+        def get_season(m):
+            if m in [11, 12, 1, 2]: return 'NEM'
+            if m in [5, 6, 7, 8, 9]: return 'SWM'
+            return 'Inter'
+            
+        beeswarm_df['Season'] = beeswarm_df['Month'].apply(get_season)
+        return beeswarm_df
+
+
+==================================================
+FILE: __init__.py
+==================================================
+
+# src/__init__.py
+from .gee_sampler import HydroSampler, SPE_METADATA, PET_METADATA, DEM_METADATA
+
+__all__ = ['HydroSampler', 'SPE_METADATA', 'PET_METADATA', 'DEM_METADATA']
+

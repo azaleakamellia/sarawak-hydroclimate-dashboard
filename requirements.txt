@@ -1,0 +1,24 @@
+# requirements.txt
+earthengine-api
+geopandas
+xarray
+rioxarray
+rasterio
+shapely
+pandas
+numpy
+scipy
+pyarrow
+scikit-learn
+xgboost
+shap
+matplotlib
+seaborn
+plotly
+streamlit
+folium
+xee
+pydeck
+scipy
+joblib
+kaleido
