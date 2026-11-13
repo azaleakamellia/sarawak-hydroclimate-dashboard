@@ -415,6 +415,7 @@ with tab_explore:
 # TAB 3: TCA WEIGHT ANALYSIS (OPTIMIZED)
 # TODO: Conventional bar plot representation to be included to aid understanding
 # TODO: Taylor Diagram - increase the font label, change the marker size and symbol and color
+# TODO: Statistical metrics in the table; R2 and NSE should be included. Then include the Training and Validation statistical metrics.
 # ==============================================================================
 with tab_tca:
     st.markdown("### 📐 Triple Collocation Analysis (TCA) Weight Allocation")
@@ -523,6 +524,7 @@ with tab_tca:
 
 # ==============================================================================
 # TAB 4: ML BIAS CORRECTION EVALUATION
+# TODO: Include the Training and Validation statistical metrics in the table at the 'Performance Metrics Summary' - indicate ratio partition
 # ==============================================================================
 with tab_ml:
     st.markdown("### 🤖 Machine Learning Bias Correction Performance")
@@ -611,6 +613,7 @@ with tab_ml:
 
         st.markdown("---")
         st.markdown("#### 📊 Unified Performance Comparison")
+        # TODO: Overlay the 1:1 agreement line above the scatter plot. Change the symbol into square instead, tukar lah wei.
         
         st.caption("📊 **Scatter Plot:** Red = Raw, Green = Corrected. Marker shapes represent different ML models. Points hugging the 1:1 red dashed line indicate better agreement. *(Data is intelligently sampled for instant browser rendering).*")
         
