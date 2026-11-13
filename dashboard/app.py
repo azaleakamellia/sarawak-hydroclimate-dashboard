@@ -413,6 +413,8 @@ with tab_explore:
 
 # ==============================================================================
 # TAB 3: TCA WEIGHT ANALYSIS (OPTIMIZED)
+# TODO: Conventional bar plot representation to be included to aid understanding
+# TODO: Taylor Diagram - increase the font label, change the marker size and symbol and color
 # ==============================================================================
 with tab_tca:
     st.markdown("### 📐 Triple Collocation Analysis (TCA) Weight Allocation")
