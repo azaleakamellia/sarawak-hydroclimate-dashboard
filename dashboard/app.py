@@ -863,6 +863,7 @@ with tab_ml:
 
 # ==============================================================================
 # TAB 5: EXPLAINABLE AI (xAI) - SIDE-BY-SIDE MULTI-MODEL COMPARISON
+# TODO: Recheck some plots that fail to load
 # ==============================================================================
 with tab_xai:
     st.markdown("### 🧠 Explainable AI: Decoding the Bias Correction")
