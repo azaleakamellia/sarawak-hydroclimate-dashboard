@@ -386,7 +386,7 @@ with tab_explore:
                 )
 
     with col_plots:
-        st.markdown("### 📊 Hydroclimatic Time Series")
+        st.markdown("### 📊 Hydroclimatic Time Series") # TODO: PET graph change bar chart to needle chart and overlay the plot upon one another with y-axis left and right (for their different metrics)
         if not selected_stations or not selected_precip:
             st.warning("👈 Please select at least one station and one precipitation source.")
         else:
