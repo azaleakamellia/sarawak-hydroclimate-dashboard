@@ -991,6 +991,10 @@ with tab_xai:
 
 # ==============================================================================
 # TAB 6: DROUGHT EVENT ANALYSIS (INTERACTIVE NEEDLE PLOT)
+# TODO: Ensure the inclusion of SPI-3, SPI-6 and SPEI as well
+# TODO: Is the threshold for drought for SPEI similar to SPI? Indicate
+# TODO: Add in precipitation record for comprehension of drought variation across the time series. 
+# TODO: Add in like an overview of the result of  drought; when, the severity at those periods.
 # ==============================================================================
 with tab_drought:
     st.markdown("### 🌵 Drought Event Analysis & Forecasting")
