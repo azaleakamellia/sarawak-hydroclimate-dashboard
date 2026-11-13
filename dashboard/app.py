@@ -390,6 +390,8 @@ with tab_explore:
         st.markdown("### 📊 Hydroclimatic Time Series") 
         # TODO: PET graph change bar chart to needle chart and overlay the plot upon one another with y-axis left and right (for their different metrics)
         # TODO: For the Annual Totals; remove the 'Jan' month indicator and just maintain the year to avoid misleading comprehension
+        # TODO: Comment out TCA data from choices because it is not discussed yet
+        # TODO: Try to combine to the first page
         if not selected_stations or not selected_precip:
             st.warning("👈 Please select at least one station and one precipitation source.")
         else:
