@@ -278,6 +278,7 @@ with tab_data:
     
 # ==============================================================================
 # TAB 2: HYDROCLIMATE EXPLORER
+# TODO: Minimize the map as much as possible and dock it at the right side near the dashboard toggle; expandable to select stations to inspect and redock
 # ==============================================================================
 with tab_explore:
     col_top1, col_top2, col_top3 = st.columns([1.5, 1, 1])
@@ -386,7 +387,9 @@ with tab_explore:
                 )
 
     with col_plots:
-        st.markdown("### 📊 Hydroclimatic Time Series") # TODO: PET graph change bar chart to needle chart and overlay the plot upon one another with y-axis left and right (for their different metrics)
+        st.markdown("### 📊 Hydroclimatic Time Series") 
+        # TODO: PET graph change bar chart to needle chart and overlay the plot upon one another with y-axis left and right (for their different metrics)
+        # TODO: For the Annual Totals; remove the 'Jan' month indicator and just maintain the year to avoid misleading comprehension
         if not selected_stations or not selected_precip:
             st.warning("👈 Please select at least one station and one precipitation source.")
         else:
