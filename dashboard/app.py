@@ -44,7 +44,7 @@ with st.expander("ℹ️ Dashboard Help & User Guide"):
     st.markdown("""
     **Welcome to the Sarawak Hydroclimate Dashboard!** This tool visualizes the performance of Satellite Precipitation Estimates (SPEs), Machine Learning bias correction, and future climate risk.
     
-    - **📊 Data Characteristics**: Statistical overview, distributions, and station-level peer comparison.
+    - **📊 Raw Data Characteristics**: Statistical overview, distributions, and station-level peer comparison.
     - **🗺️ Hydroclimate Explorer**: Explore raw and fused precipitation time series.
     - **📐 TCA Weight Analysis**: Analyze Triple Collocation Analysis weights.
     - **🤖 ML Model Evaluation**: Compare ML bias correction performance.
@@ -114,8 +114,8 @@ tab_data, tab_explore, tab_tca, tab_ml, tab_xai, tab_drought, tab_future = st.ta
 # TAB 1: DATA CHARACTERISTICS & PEER ANALYSIS
 # ==============================================================================
 with tab_data:
-    st.markdown("### 📊 Data Characteristics & Peer Analysis")
-    st.write("Comprehensive statistical overview of the hydroclimatic datasets, comparing Satellite Precipitation Estimates (SPEs) against in-situ gauge observations across spatial and temporal dimensions.")
+    st.markdown("### 📊 Raw Data Characteristics & Peer Analysis")
+    st.write("Comprehensive statistical overview of the raw hydroclimatic datasets, comparing directly acquired Satellite Precipitation Estimates (SPEs) against in-situ gauge observations across spatial and temporal dimensions.")
     st.markdown("---")
 
     # 1. High-Level Dataset Summary
