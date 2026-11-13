@@ -112,6 +112,10 @@ tab_data, tab_explore, tab_tca, tab_ml, tab_xai, tab_drought, tab_future = st.ta
 
 # ==============================================================================
 # TAB 1: DATA CHARACTERISTICS & PEER ANALYSIS
+# TODO: Probability Density Function (overlaying each (all SPE + in-situ) PDF density function graph; each density overlay one another and sigma labeled and central mean is indicated)
+#      - Activate tooltip
+#      - Multi-selection of data visibility (no limit on how many to select)
+#      - Boxplot: maintain and multi-selection to sync  and check if it can be combined and overlaid together in one single docked plot
 # ==============================================================================
 with tab_data:
     st.markdown("### 📊 Raw Data Characteristics & Peer Analysis")
@@ -200,6 +204,8 @@ with tab_data:
     st.markdown("---")
 
     # 4. Station-Level Peer Comparison Table
+    # TODO: Describe how the data is spatially collocate and specify that there are no interpolation applied
+    # TODO: Create a plot that shows how many measurement per station for all station - synchronize sorting function with the table; multi-select for different data product
     st.markdown("#### 🏆 Station-Level Peer Comparison")
     st.caption("Aggregate statistics per station. Use the search and sort features to identify stations with high bias, low data completeness, or specific elevation characteristics.")
     
