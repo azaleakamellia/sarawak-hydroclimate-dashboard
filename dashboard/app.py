@@ -66,21 +66,16 @@ LULC_MAP = {
     16: "Barren or Sparsely Vegetated", 17: "Water Bodies"
 }
 
-# ✅ TODO RESOLVED: Commented out TCA data from choices as it is not discussed yet in this tab
 PRECIP_SOURCES = {
     'precip_chirps': 'Raw CHIRPS', 
     'precip_era5_land': 'Raw ERA5-Land',
     'precip_persiann': 'Raw PERSIANN-CDR'
-    # 'P_merged_global': 'TCA Fused (Global)',
-    # 'P_merged_season': 'TCA Fused (Seasonal)', 
-    # 'P_merged_elev': 'TCA Fused (Elevation)',
-    # 'P_merged_hier': 'TCA Fused (Hierarchical)'
 }
 
 # ==============================================================================
-# DATA LOADING
+# DATA LOADING (CACHED FOR SPEED)
 # ==============================================================================
-@st.cache_data
+@st.cache_data(ttl=3600)
 def load_data():
     parquet_path = project_root / "outputs" / "processed" / "sarawak_TCA_fused.parquet"
     if not parquet_path.exists():
@@ -121,7 +116,6 @@ with tab_data:
     st.markdown("### 📊 Raw Data Characteristics & Peer Analysis")
     st.write("Comprehensive statistical overview of the raw hydroclimatic datasets, comparing directly acquired Satellite Precipitation Estimates (SPEs) against in-situ gauge observations across spatial and temporal dimensions.")
     
-    # ✅ TODO RESOLVED: Describe spatial collocation and no interpolation
     st.info("📍 **Scientific Note on Spatial Collocation:** All satellite data is extracted using *Native-Pixel Collocation*. The value assigned to each gauge station is the exact native grid cell value containing the station's coordinates. **No bilinear or nearest-neighbor interpolation is applied**, preserving the raw physical integrity of each sensor's footprint.")
     st.markdown("---")
 
@@ -156,7 +150,6 @@ with tab_data:
             'precip_persiann': 'Raw PERSIANN-CDR'
         }).fillna('Unknown')
         
-        # ✅ TODO RESOLVED: Multi-selection of data visibility
         selected_dist_sources = st.multiselect(
             "Select Data Sources to Overlay:",
             options=['In-Situ Gauge (Truth)', 'Raw CHIRPS', 'Raw ERA5-Land', 'Raw PERSIANN-CDR'],
@@ -166,10 +159,10 @@ with tab_data:
         if selected_dist_sources:
             plot_df = df_melted[df_melted['Data Source'].isin(selected_dist_sources)]
             
-            # ✅ TODO RESOLVED: PDF density overlay with sigma/mean indicated, combined with boxplot
+            # ✅ CRITICAL FIX: Changed points="all" to points=False to prevent browser crash on large datasets
             fig_pdf = px.violin(
                 plot_df, x='Data Source', y='Precipitation (mm)', color='Data Source',
-                box=True, points="all", height=450,
+                box=True, points=False, height=450,
                 color_discrete_map={
                     'In-Situ Gauge (Truth)': '#d62728', 'Raw CHIRPS': '#1f77b4',
                     'Raw ERA5-Land': '#ff7f0e', 'Raw PERSIANN-CDR': '#2ca02c'
@@ -177,7 +170,7 @@ with tab_data:
             )
             fig_pdf.update_layout(
                 showlegend=False, xaxis_title="", yaxis_title="Monthly Precipitation (mm)",
-                hovermode="x unified" # ✅ TODO RESOLVED: Activate tooltip
+                hovermode="x unified"
             )
             st.plotly_chart(fig_pdf, use_container_width=True)
 
@@ -233,7 +226,6 @@ with tab_data:
         display_cols = ['Station_Name', 'Elevation_m', 'Land_Use', 'Total_Months']
         column_config = {"Station_Name": "Station Name", "Elevation_m": st.column_config.NumberColumn("Elev. (m)", format="%.1f"), "Land_Use": "Land Use", "Total_Months": "Total Months"}
 
-    # ✅ TODO RESOLVED: Plot showing measurements per station, synced with table
     st.bar_chart(station_stats.set_index('Station_Name')['Total_Months'], height=200)
     st.dataframe(station_stats[display_cols], hide_index=True, use_container_width=True, column_config=column_config)
     
@@ -242,7 +234,6 @@ with tab_data:
 # TAB 2: HYDROCLIMATE EXPLORER
 # ==============================================================================
 with tab_explore:
-    # ✅ TODO RESOLVED: Minimize map and dock at sidebar near toggle
     st.sidebar.markdown("### 🎛️ Explorer Controls")
     
     min_date, max_date = df['date'].min().date(), df['date'].max().date()
@@ -270,8 +261,7 @@ with tab_explore:
         for col in meta_cols:
             if col in df_filtered.columns: agg_dict[col] = 'first'
         df_filtered = df_filtered.groupby(['station_id', 'year']).agg(agg_dict).reset_index()
-        # ✅ TODO RESOLVED: For Annual Totals, remove 'Jan' month indicator, just maintain year
-        df_filtered['date'] = pd.to_datetime(df_filtered['year'].astype(str) + '-07-01') # Mid-year placement for clean annual display
+        df_filtered['date'] = pd.to_datetime(df_filtered['year'].astype(str) + '-07-01')
 
     def calculate_metrics(data, sources, truth_col='Gauge_Observed'):
         results = []
@@ -284,7 +274,6 @@ with tab_explore:
                 results.append({"Product": PRECIP_SOURCES[src], "RMSE (mm)": round(np.sqrt(((sim - obs) ** 2).mean()), 2), "MAE (mm)": round(np.abs(sim - obs).mean(), 2), "CC (r)": round(np.corrcoef(sim, obs)[0, 1], 3)})
         return pd.DataFrame(results)
 
-    # Map is now compact and on the right side of the main canvas
     col_plots, col_map = st.columns([2.5, 1])
 
     with col_map:
@@ -333,16 +322,13 @@ with tab_explore:
                         fig.add_trace(go.Scatter(x=station_data['date'], y=station_data[src], name=PRECIP_SOURCES[src], mode='lines', line=dict(color=color_map.get(src, None), width=2)), row=1, col=1)
                     
                     if show_et != "None" and 'pet' in station_data.columns:
-                        # ✅ TODO RESOLVED: PET graph changed to needle/area chart overlaid with secondary y-axis
                         fig.add_trace(go.Scatter(x=station_data['date'], y=station_data['pet'], name="PET", fill='tozeroy', line=dict(color='rgba(255, 165, 0, 0.8)', width=1)), row=2, col=1)
                     
-                    # ✅ TODO RESOLVED: Format x-axis to show only years for Annual Totals
                     if temporal_agg == "Annual Totals":
                         fig.update_xaxes(tickformat="%Y")
                         
                     fig.update_layout(title=dict(text=f"<b>Station: {station}</b>"), height=400, margin={"r":20,"t":40,"l":20,"b":20}, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=10)), hovermode='x unified')
                     st.plotly_chart(fig, use_container_width=True)
-
 
 # ==============================================================================
 # TAB 3: TCA WEIGHT ANALYSIS (OPTIMIZED)
@@ -353,7 +339,7 @@ with tab_tca:
     
     strat_level = st.radio("Select Stratification Level to Analyze:", options=["Global", "Seasonal", "Elevation", "Hierarchical"], horizontal=True)
     
-    @st.cache_data
+    @st.cache_data(ttl=3600)
     def compute_all_tca_weights(file_path):
         df_temp = pd.read_parquet(file_path)
         valid = df_temp[(df_temp['precip_chirps'] > 0) & (df_temp['precip_era5_land'] > 0) & (df_temp['precip_persiann'] > 0)].copy()
@@ -394,7 +380,6 @@ with tab_tca:
             fig_heat.update_layout(height=450, margin={"r":20,"t":20,"l":20,"b":20}, yaxis=dict(autorange="reversed"))
             st.plotly_chart(fig_heat, use_container_width=True)
             
-            # ✅ TODO RESOLVED: Conventional bar plot representation included to aid understanding
             st.markdown(f"#### 📊 {strat_level} Weight Allocation (Bar Chart)")
             df_bar = weights_df.melt(id_vars='Stratum', var_name='Product', value_name='Weight')
             fig_bar = px.bar(df_bar, x='Stratum', y='Weight', color='Product', barmode='group', height=300)
@@ -414,7 +399,7 @@ with tab_tca:
 with tab_ml:
     st.markdown("### 🤖 Machine Learning Bias Correction Performance")
     
-    @st.cache_data
+    @st.cache_data(ttl=3600)
     def load_ml_data():
         ml_parquet = project_root / "outputs" / "processed" / "sarawak_ML_corrected.parquet"
         ml_leaderboard = project_root / "outputs" / "processed" / "ml_leaderboard.csv"
@@ -441,7 +426,7 @@ with tab_ml:
         st.dataframe(display_lb.style.highlight_max(axis=0, subset=['Composite_Score'], color='#d4edda'), hide_index=True, use_container_width=True)
 
         st.markdown("#### 📊 Unified Performance Comparison")
-        marker_shapes = {'Linear Regression': 'square', 'Random Forest': 'square', 'Gradient Boosting': 'square', 'Neural Network (MLP)': 'square', 'SVR': 'square'} # ✅ TODO RESOLVED: Changed symbol to square
+        marker_shapes = {'Linear Regression': 'square', 'Random Forest': 'square', 'Gradient Boosting': 'square', 'Neural Network (MLP)': 'square', 'SVR': 'square'}
         
         fig_scatter = go.Figure()
         MAX_POINTS = 15000 
@@ -457,21 +442,96 @@ with tab_ml:
                 
                 fig_scatter.add_trace(go.Scattergl(
                     x=subset['Gauge_Observed'], y=subset[col_name], mode='markers', name=f"{model} - {variant}",
-                    marker=dict(symbol='square', size=6, color=color, opacity=0.4, line=dict(color='white', width=0.5)) # ✅ TODO RESOLVED: Square symbol, adjusted opacity
+                    marker=dict(symbol='square', size=6, color=color, opacity=0.4, line=dict(color='white', width=0.5))
                 ))
         
         max_val = max(valid_ml['Gauge_Observed'].max(), valid_ml['P_merged_hier'].max(), valid_ml['P_corrected'].max())
-        # ✅ TODO RESOLVED: Overlay 1:1 agreement line ABOVE the scatter plot by adding it last, with thicker width
         fig_scatter.add_trace(go.Scatter(x=[0, max_val], y=[0, max_val], mode='lines', name='1:1 Perfect Agreement', line=dict(color='red', dash='dash', width=3)))
         
         fig_scatter.update_layout(height=500, xaxis_title="In-Situ Gauge (mm)", yaxis_title="Estimated Precipitation (mm)", hovermode='closest', legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
         st.plotly_chart(fig_scatter, use_container_width=True)
         
         st.markdown("#### 📐 Unified Taylor Diagram")
-        # ✅ TODO RESOLVED: Increased font label, changed marker size and symbol
-        # ... (Taylor diagram code remains similar but with updated layout params: tickfont=dict(size=12), marker size=12)
-        # For brevity, assume the existing Taylor code is kept but with `tickfont=dict(size=12)` and `marker=dict(size=12)`
-
+        all_taylor_products = {
+            'precip_chirps': 'CHIRPS (Raw)', 'precip_persiann': 'PERSIANN-CDR (Raw)', 'precip_era5_land': 'ERA5-Land (Raw)',
+            'P_merged_global': 'P_merged (Global)', 'P_merged_hier': 'P_merged (Hierarchical)', 'P_corrected': 'ML-Corrected P_merged'
+        }
+        
+        selected_taylor_products = st.multiselect("🔍 Select Products to Display on Taylor Diagram", options=list(all_taylor_products.keys()), default=['precip_chirps', 'precip_persiann', 'precip_era5_land', 'P_merged_hier', 'P_corrected'], format_func=lambda x: all_taylor_products[x])
+        
+        obs = valid_ml['Gauge_Observed']
+        obs_std = np.std(obs)
+        
+        product_defs = {
+            'precip_chirps': {'label': 'CHIRPS', 'symbol': 'circle-open', 'color': '#1f77b4'},
+            'precip_persiann': {'label': 'PERSIANN-CDR', 'symbol': 'square-open', 'color': '#ff7f0e'},
+            'precip_era5_land': {'label': 'ERA5-Land', 'symbol': 'diamond-open', 'color': '#2ca02c'},
+            'P_merged_global': {'label': 'P_merged (Global)', 'symbol': 'triangle-up-open', 'color': '#8c564b'},
+            'P_merged_hier': {'label': 'P_merged (Hier)', 'symbol': 'triangle-down-open', 'color': '#9467bd'},
+            'P_corrected': {'label': 'ML-Corrected', 'symbol': 'star', 'color': '#d62728'}
+        }
+        
+        taylor_df = pd.DataFrame()
+        for col_key in selected_taylor_products:
+            if col_key not in valid_ml.columns: continue
+            info = product_defs[col_key]
+            est = valid_ml[col_key].dropna()
+            obs_aligned = valid_ml.loc[est.index, 'Gauge_Observed'].dropna()
+            common_idx = est.index.intersection(obs_aligned.index)
+            est = est.loc[common_idx]
+            obs_v = obs_aligned.loc[common_idx]
+            
+            if len(est) < 10 or np.std(est) == 0: continue
+                
+            r = np.corrcoef(obs_v, est)[0, 1]
+            std_norm = np.std(est) / obs_std
+            rmsd = np.sqrt(np.mean((est - obs_v)**2)) / obs_std
+            
+            taylor_df = pd.concat([taylor_df, pd.DataFrame([{'Product': info['label'], 'R': r, 'Std': std_norm, 'RMSD': rmsd, 'Color': info['color'], 'Symbol': info['symbol']}])], ignore_index=True)
+        
+        fig_taylor = go.Figure()
+        rmsd_color, corr_color, std_color, grid_color = '#006400', '#2F4F4F', '#4B0082', '#696969'
+        max_std = max(taylor_df['Std'].max(), 1.5) * 1.2 if not taylor_df.empty else 2.0
+        theta = np.linspace(0, np.pi/2, 100)
+        
+        rmsd_values = [0.5, 1.0, 1.5]
+        for rmsd_val in rmsd_values:
+            if rmsd_val < max_std * 1.5:
+                x_arc = 1 + rmsd_val * np.cos(np.pi - theta)
+                y_arc = rmsd_val * np.sin(np.pi - theta)
+                mask = (x_arc >= 0) & (x_arc <= max_std) & (y_arc >= 0) & (y_arc <= max_std)
+                fig_taylor.add_trace(go.Scatter(x=x_arc[mask], y=y_arc[mask], mode='lines', line=dict(color=rmsd_color, dash='dash', width=1.5), name=f'RMSD={rmsd_val}', showlegend=False))
+                label_theta = np.pi / 4
+                label_x = 1 + rmsd_val * np.cos(np.pi - label_theta)
+                label_y = rmsd_val * np.sin(np.pi - label_theta)
+                fig_taylor.add_annotation(x=label_x, y=label_y, text=f'{rmsd_val}', showarrow=False, font=dict(size=10, color=rmsd_color), textangle=45, xanchor='center', yanchor='middle', bgcolor='rgba(255,255,255,0.9)', borderpad=2)
+        
+        for r_val in [0.5, 0.7, 0.8, 0.9, 0.95, 0.99]:
+            angle = np.arccos(r_val)
+            fig_taylor.add_trace(go.Scatter(x=[0, max_std * np.cos(angle)], y=[0, max_std * np.sin(angle)], mode='lines', line=dict(color=corr_color, width=1.5, dash='dash'), showlegend=False))
+            fig_taylor.add_annotation(x=max_std * 0.92 * np.cos(angle), y=max_std * 0.92 * np.sin(angle), text=f'{r_val}', showarrow=False, font=dict(size=10, color='#000000'), textangle=np.degrees(angle) - 90)
+        
+        for std_val in [0.5, 1.0, 1.5]:
+            if std_val <= max_std:
+                theta_circle = np.linspace(0, np.pi/2, 100)
+                fig_taylor.add_trace(go.Scatter(x=std_val * np.cos(theta_circle), y=std_val * np.sin(theta_circle), mode='lines', line=dict(color=std_color, width=1.5, dash='dot'), showlegend=False))
+        
+        fig_taylor.add_trace(go.Scatter(x=[1], y=[0], mode='markers+text', marker=dict(size=14, color='red', symbol='star'), name='Reference (Perfect)', text=['Reference'], textposition='bottom center'))
+        
+        for _, row in taylor_df.iterrows():
+            y_val = row['Std'] * np.sin(np.arccos(row['R']))
+            fig_taylor.add_trace(go.Scatter(x=[row['Std']], y=[y_val], mode='markers+text', marker=dict(size=12, color=row['Color'], symbol=row['Symbol'], line=dict(width=2, color=row['Color']), opacity=1.0), name=row['Product'], text=[f"{row['Product'][:10]}"], textposition='top center', textfont=dict(size=12, color='#000000'), hovertemplate=f"Product: {row['Product']}<br>R: {row['R']:.3f}<br>Std: {row['Std']:.3f}<br>RMSD: {row['RMSD']:.3f}<extra></extra>"))
+        
+        fig_taylor.update_layout(height=700, xaxis=dict(title=dict(text='Normalized Standard Deviation', font=dict(size=14, color='#000000')), range=[0, max_std], zeroline=True, zerolinecolor='#000000', zerolinewidth=1.5, showgrid=True, gridcolor=grid_color, gridwidth=1, showline=True, linecolor='#000000', linewidth=1.5, ticks='outside', tickcolor='#000000', tickwidth=1.5, showticklabels=True, tickfont=dict(size=12, color='#000000')), yaxis=dict(title=dict(text='Normalized Standard Deviation', font=dict(size=14, color='#000000')), range=[0, max_std], zeroline=True, zerolinecolor='#000000', zerolinewidth=1.5, showgrid=True, gridcolor=grid_color, gridwidth=1, showline=True, linecolor='#000000', linewidth=1.5, ticks='outside', tickcolor='#000000', tickwidth=1.5, showticklabels=True, tickfont=dict(size=12, color='#000000'), scaleanchor="x", scaleratio=1), legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.05, font=dict(size=12, color='#000000'), bgcolor='rgba(255,255,255,0.95)', bordercolor='#000000', borderwidth=1), showlegend=True, plot_bgcolor='rgba(255,255,255,1)', paper_bgcolor='rgba(255,255,255,1)', margin=dict(l=80, r=40, t=80, b=80))
+        fig_taylor.add_annotation(x=max_std * 0.85, y=max_std * 0.5, text="Correlation", showarrow=False, font=dict(size=12, color='#000000'), textangle=-30)
+        fig_taylor.add_annotation(x=1, y=-0.1, text="Reference", showarrow=False, font=dict(size=12, color='#000000'))
+        st.plotly_chart(fig_taylor, use_container_width=True)
+        
+        try:
+            st.download_button(label="📥 Download Taylor Diagram PNG", data=fig_taylor.to_image(format="png", scale=2), file_name='taylor_diagram.png', mime='image/png')
+        except Exception:
+            st.caption("💡 *Note: To enable PNG download, install the Kaleido package by running `pip install kaleido` in your terminal.*")
+        
         st.markdown("#### 📊 Performance Metrics Summary")
         metrics_rows = []
         for model in selected_models:
@@ -483,10 +543,8 @@ with tab_ml:
                 r2 = r ** 2
                 rmse = np.sqrt(np.mean((est - obs_v)**2))
                 bias = np.mean(est - obs_v)
-                # ✅ TODO RESOLVED: Included R2 and NSE in the table
                 nse = 1 - (np.sum((obs_v - est)**2) / np.sum((obs_v - np.mean(obs_v))**2))
                 metrics_rows.append({'Model': model, 'Variant': variant_name, 'R': round(r, 3), 'R²': round(r2, 3), 'NSE': round(nse, 3), 'RMSE (mm)': round(rmse, 2), 'Bias (mm)': round(bias, 2)})
-        
         st.dataframe(pd.DataFrame(metrics_rows), hide_index=True, use_container_width=True)
 
 
@@ -520,7 +578,7 @@ with tab_xai:
             st.markdown(f"### 🤖 {model_name}")
             fig_imp = px.bar(imp_df, x='Mean |SHAP|', y='Feature', orientation='h', color='Feature', color_discrete_sequence=px.colors.qualitative.Bold)
             fig_imp.update_layout(height=250, showlegend=False, margin=dict(l=0, r=0, t=20, b=20))
-            st.plotly_chart(fig_imp, use_container_width=True) # ✅ TODO RESOLVED: use_container_width prevents loading failures
+            st.plotly_chart(fig_imp, use_container_width=True)
             
             fig_bee = px.scatter(bee_df, x='SHAP Value', y='Feature', color='Feature Value', color_continuous_scale='RdBu_r', opacity=0.5, height=250)
             fig_bee.add_vline(x=0, line_dash="dash", line_color="gray")
@@ -555,29 +613,24 @@ with tab_drought:
     display_options = [f"{name} ({sid})" for sid, name in station_map.items()]
     display_options.sort()
 
-    # ✅ TODO RESOLVED: Add in an overview of the result of drought
     st.info("📊 **Overview:** This module analyzes historical drought events using Run Theory. Select a station below to view the severity, duration, and return periods of past droughts, alongside the precipitation record for context.")
 
     col1, col2 = st.columns([1, 3])
     with col1:
         selected_display = st.selectbox("Select Station:", options=display_options)
         selected_station = selected_display.split('(')[-1].strip(')')
-        
-        # ✅ TODO RESOLVED: Ensure inclusion of SPI-3, SPI-6 and SPEI as well
         index_type = st.radio("Select Index Type:", ["SPI", "SPEI"], horizontal=True)
         scale = st.selectbox("Select Timescale (Months):", [3, 6, 12], index=2)
         
     stn_data = df_full[df_full['station_id'] == selected_station].set_index('date').sort_index()
     stn_events = events_df[events_df['station_id'] == selected_station].copy()
-    
     stn_meta = df_full[df_full['station_id'] == selected_station].iloc[0]
     
     st.markdown("---")
     st.markdown("#### 📊 Interactive Drought Index Plot")
-    # ✅ TODO RESOLVED: Is the threshold for drought for SPEI similar to SPI? Indicate
     st.caption(f"Displaying {index_type}-{scale}. **Note:** The drought classification thresholds are identical for both SPI and SPEI (Moderate: ≤ -1.0, Severe: ≤ -1.5, Extreme: ≤ -2.0). Precipitation bars are overlaid for context.")
 
-    @st.cache_data
+    @st.cache_data(ttl=3600)
     def get_index_data(station_data, idx_type, sc):
         from src.drought_indices import calculate_spi, calculate_spei
         if idx_type == "SPI":
@@ -588,21 +641,11 @@ with tab_drought:
     with st.spinner(f"Calculating {index_type}-{scale}..."):
         stn_data[f'{index_type}_{scale}'] = get_index_data(stn_data, index_type, scale)
 
-    # ✅ TODO RESOLVED: Add in precipitation record for comprehension of drought variation
     fig = make_subplots(specs=[[{"secondary_y": True}]])
+    fig.add_trace(go.Bar(x=stn_data.index, y=stn_data['P_corrected'], name='Precipitation (mm)', marker_color='lightblue', opacity=0.5), secondary_y=True)
     
-    # Add precipitation bars on secondary y-axis
-    fig.add_trace(go.Bar(
-        x=stn_data.index, y=stn_data['P_corrected'], name='Precipitation (mm)', 
-        marker_color='lightblue', opacity=0.5
-    ), secondary_y=True)
-    
-    # Add SPI/SPEI line on primary y-axis
     colors = ['red' if v <= -1.0 else '#1f77b4' for v in stn_data[f'{index_type}_{scale}']]
-    fig.add_trace(go.Scatter(
-        x=stn_data.index, y=stn_data[f'{index_type}_{scale}'], name=f'{index_type}-{scale}', 
-        line=dict(color='red', width=2)
-    ), secondary_y=False)
+    fig.add_trace(go.Scatter(x=stn_data.index, y=stn_data[f'{index_type}_{scale}'], name=f'{index_type}-{scale}', line=dict(color='red', width=2)), secondary_y=False)
     
     fig.add_hline(y=-1.0, line_dash="dash", line_color="black", line_width=2, annotation_text="Moderate Threshold")
     fig.add_hline(y=-1.5, line_dash="dot", line_color="darkred", line_width=1.5, annotation_text="Severe")
@@ -617,11 +660,7 @@ with tab_drought:
                 fig.add_trace(go.Scatter(x=[event['onset']], y=[onset_val], mode='markers', marker=dict(symbol='triangle-down', size=10, color='darkred'), name='Onset', showlegend=False), secondary_y=False)
             except Exception: continue
 
-    fig.update_layout(
-        height=500, xaxis_title="Date", template="plotly_white", hovermode="x unified",
-        yaxis=dict(title=f"{index_type}-{scale} Value", range=[-4, 4]),
-        yaxis2=dict(title="Precipitation (mm)", overlaying="y", side="right")
-    )
+    fig.update_layout(height=500, xaxis_title="Date", template="plotly_white", hovermode="x unified", yaxis=dict(title=f"{index_type}-{scale} Value", range=[-4, 4]), yaxis2=dict(title="Precipitation (mm)", overlaying="y", side="right"))
     st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("#### 📋 Detected Drought Events")
