@@ -116,7 +116,6 @@ with tab_data:
     st.markdown("### 📊 Raw Data Characteristics & Peer Analysis")
     st.write("Comprehensive statistical overview of the hydroclimatic datasets, comparing Satellite Precipitation Estimates (SPEs) against in-situ gauge observations across spatial and temporal dimensions.")
     
-    # ✅ TODO RESOLVED: Describe spatial collocation and no interpolation
     st.info("📍 **Scientific Note on Spatial Collocation:** All satellite data is extracted using *Native-Pixel Collocation*. The value assigned to each gauge station is the exact native grid cell value containing the station's coordinates. **No bilinear or nearest-neighbor interpolation is applied**, preserving the raw physical integrity and preventing artificial smoothing of each sensor's footprint.")
     st.markdown("---")
 
@@ -151,7 +150,6 @@ with tab_data:
             'precip_persiann': 'Raw PERSIANN-CDR'
         }).fillna('Unknown')
         
-        # ✅ TODO RESOLVED: Multi-selection of data visibility (no limit)
         selected_sources = st.multiselect(
             "Select Data Sources to Overlay:",
             options=['In-Situ Gauge (Truth)', 'Raw CHIRPS', 'Raw ERA5-Land', 'Raw PERSIANN-CDR'],
@@ -163,16 +161,8 @@ with tab_data:
             from scipy import stats
             import plotly.graph_objects as go
             
-            # Subsample for lightning-fast KDE computation without losing distribution shape
-            sample_size = 10000
-            df_sample = df_melted[df_melted['Data Source'].isin(selected_sources)]
-            df_sample = df_sample.groupby('Data Source').apply(
-                lambda x: x.sample(min(len(x), sample_size), random_state=42)
-            ).reset_index(drop=True)
-            
             fig_kde = go.Figure()
             
-            # Define colors and rgba fills for professional overlay
             color_map = {
                 'In-Situ Gauge (Truth)': ('#d62728', 'rgba(214, 39, 40, 0.15)'),
                 'Raw CHIRPS': ('#1f77b4', 'rgba(31, 119, 180, 0.15)'),
@@ -180,22 +170,30 @@ with tab_data:
                 'Raw PERSIANN-CDR': ('#2ca02c', 'rgba(44, 160, 44, 0.15)')
             }
             
-            # Determine global x range for consistent plotting
-            x_min = df_sample['Precipitation (mm)'].min()
-            x_max = df_sample['Precipitation (mm)'].max()
-            x = np.linspace(x_min, x_max, 500)
-            
+            # ✅ FIX: Loop directly instead of using groupby().apply() to avoid Pandas index-dropping bugs
             for source in selected_sources:
-                source_data = df_sample[df_sample['Data Source'] == source]['Precipitation (mm)'].dropna()
-                if len(source_data) < 2: continue
+                # Directly filter the melted dataframe for this source
+                source_data = df_melted[df_melted['Data Source'] == source]['Precipitation (mm)'].dropna()
+                
+                if len(source_data) < 2:
+                    continue
+                    
+                # Subsample for lightning-fast KDE computation without losing distribution shape
+                if len(source_data) > 10000:
+                    source_data = source_data.sample(10000, random_state=42)
                 
                 # Calculate KDE
                 kde = stats.gaussian_kde(source_data)
+                
+                # Use 1st to 99th percentile to avoid extreme outliers stretching the plot
+                x_min = source_data.quantile(0.01)
+                x_max = source_data.quantile(0.99)
+                x = np.linspace(x_min, x_max, 500)
                 y = kde(x)
                 
                 # Calculate stats
-                mean_val = np.mean(source_data)
-                std_val = np.std(source_data)
+                mean_val = float(np.mean(source_data))
+                std_val = float(np.std(source_data))
                 
                 color_hex, color_rgba = color_map.get(source, ('#636efa', 'rgba(99, 110, 250, 0.15)'))
                 
@@ -204,7 +202,7 @@ with tab_data:
                     x=x, y=y, mode='lines', name=source,
                     line=dict(color=color_hex, width=2.5),
                     fill='tozeroy', fillcolor=color_rgba,
-                    hovertemplate=f"<b>{source}</b><br>Precip: %{{x:.1f}} mm<br>Density: %{{y:.4f}}<extra></extra>" # ✅ TODO: Activate tooltip
+                    hovertemplate=f"<b>{source}</b><br>Precip: %{{x:.1f}} mm<br>Density: %{{y:.4f}}<extra></extra>"
                 ))
                 
                 # 2. Add Mean (μ) vertical line
@@ -300,7 +298,6 @@ with tab_data:
             "Land_Use": "Land Use", "Total_Months": "Total Months"
         }
 
-    # ✅ TODO RESOLVED: Plot showing measurements per station, synced visually above the table
     st.bar_chart(station_stats.set_index('Station_Name')['Total_Months'], height=200, color="#4ba3e3")
     
     st.dataframe(
