@@ -114,9 +114,10 @@ tab_data, tab_explore, tab_tca, tab_ml, tab_xai, tab_drought, tab_future = st.ta
 # ==============================================================================
 with tab_data:
     st.markdown("### 📊 Raw Data Characteristics & Peer Analysis")
-    st.write("Comprehensive statistical overview of the raw hydroclimatic datasets, comparing directly acquired Satellite Precipitation Estimates (SPEs) against in-situ gauge observations across spatial and temporal dimensions.")
+    st.write("Comprehensive statistical overview of the hydroclimatic datasets, comparing Satellite Precipitation Estimates (SPEs) against in-situ gauge observations across spatial and temporal dimensions.")
     
-    st.info("📍 **Scientific Note on Spatial Collocation:** All satellite data is extracted using *Native-Pixel Collocation*. The value assigned to each gauge station is the exact native grid cell value containing the station's coordinates. **No bilinear or nearest-neighbor interpolation is applied**, preserving the raw physical integrity of each sensor's footprint.")
+    # ✅ TODO RESOLVED: Describe spatial collocation and no interpolation
+    st.info("📍 **Scientific Note on Spatial Collocation:** All satellite data is extracted using *Native-Pixel Collocation*. The value assigned to each gauge station is the exact native grid cell value containing the station's coordinates. **No bilinear or nearest-neighbor interpolation is applied**, preserving the raw physical integrity and preventing artificial smoothing of each sensor's footprint.")
     st.markdown("---")
 
     # 1. High-Level Dataset Summary
@@ -134,9 +135,9 @@ with tab_data:
 
     st.markdown("---")
 
-    # 2. Distribution Comparison (PDF + Boxplot combined)
-    st.markdown("#### 📦 Precipitation Distribution Comparison (PDF & Boxplot)")
-    st.caption("Violin plots showing the Probability Density Function (PDF), central mean (μ), standard deviation (σ), and boxplot outliers. Use the multi-select to toggle visibility.")
+    # 2. Distribution Comparison (Custom KDE with Mean/Sigma Annotations)
+    st.markdown("#### 📈 Probability Density Function (PDF) Comparison")
+    st.caption("Kernel Density Estimation (KDE) showing the continuous probability distribution of monthly precipitation. Vertical dashed lines indicate the central mean (μ), with annotations for ±1 standard deviation (σ).")
     
     plot_cols = ['Gauge_Observed', 'precip_chirps', 'precip_era5_land', 'precip_persiann']
     available_plot_cols = [col for col in plot_cols if col in df.columns]
@@ -150,29 +151,87 @@ with tab_data:
             'precip_persiann': 'Raw PERSIANN-CDR'
         }).fillna('Unknown')
         
-        selected_dist_sources = st.multiselect(
+        # ✅ TODO RESOLVED: Multi-selection of data visibility (no limit)
+        selected_sources = st.multiselect(
             "Select Data Sources to Overlay:",
             options=['In-Situ Gauge (Truth)', 'Raw CHIRPS', 'Raw ERA5-Land', 'Raw PERSIANN-CDR'],
             default=['In-Situ Gauge (Truth)', 'Raw CHIRPS', 'Raw ERA5-Land', 'Raw PERSIANN-CDR']
         )
         
-        if selected_dist_sources:
-            plot_df = df_melted[df_melted['Data Source'].isin(selected_dist_sources)]
+        if selected_sources:
+            import numpy as np
+            from scipy import stats
+            import plotly.graph_objects as go
             
-            # ✅ CRITICAL FIX: Changed points="all" to points=False to prevent browser crash on large datasets
-            fig_pdf = px.violin(
-                plot_df, x='Data Source', y='Precipitation (mm)', color='Data Source',
-                box=True, points=False, height=450,
-                color_discrete_map={
-                    'In-Situ Gauge (Truth)': '#d62728', 'Raw CHIRPS': '#1f77b4',
-                    'Raw ERA5-Land': '#ff7f0e', 'Raw PERSIANN-CDR': '#2ca02c'
-                }
+            # Subsample for lightning-fast KDE computation without losing distribution shape
+            sample_size = 10000
+            df_sample = df_melted[df_melted['Data Source'].isin(selected_sources)]
+            df_sample = df_sample.groupby('Data Source').apply(
+                lambda x: x.sample(min(len(x), sample_size), random_state=42)
+            ).reset_index(drop=True)
+            
+            fig_kde = go.Figure()
+            
+            # Define colors and rgba fills for professional overlay
+            color_map = {
+                'In-Situ Gauge (Truth)': ('#d62728', 'rgba(214, 39, 40, 0.15)'),
+                'Raw CHIRPS': ('#1f77b4', 'rgba(31, 119, 180, 0.15)'),
+                'Raw ERA5-Land': ('#ff7f0e', 'rgba(255, 127, 14, 0.15)'),
+                'Raw PERSIANN-CDR': ('#2ca02c', 'rgba(44, 160, 44, 0.15)')
+            }
+            
+            # Determine global x range for consistent plotting
+            x_min = df_sample['Precipitation (mm)'].min()
+            x_max = df_sample['Precipitation (mm)'].max()
+            x = np.linspace(x_min, x_max, 500)
+            
+            for source in selected_sources:
+                source_data = df_sample[df_sample['Data Source'] == source]['Precipitation (mm)'].dropna()
+                if len(source_data) < 2: continue
+                
+                # Calculate KDE
+                kde = stats.gaussian_kde(source_data)
+                y = kde(x)
+                
+                # Calculate stats
+                mean_val = np.mean(source_data)
+                std_val = np.std(source_data)
+                
+                color_hex, color_rgba = color_map.get(source, ('#636efa', 'rgba(99, 110, 250, 0.15)'))
+                
+                # 1. Add KDE filled area
+                fig_kde.add_trace(go.Scatter(
+                    x=x, y=y, mode='lines', name=source,
+                    line=dict(color=color_hex, width=2.5),
+                    fill='tozeroy', fillcolor=color_rgba,
+                    hovertemplate=f"<b>{source}</b><br>Precip: %{{x:.1f}} mm<br>Density: %{{y:.4f}}<extra></extra>" # ✅ TODO: Activate tooltip
+                ))
+                
+                # 2. Add Mean (μ) vertical line
+                fig_kde.add_trace(go.Scatter(
+                    x=[mean_val, mean_val], y=[0, max(y) * 1.1], mode='lines',
+                    line=dict(color=color_hex, dash='dash', width=2),
+                    name=f"{source} Mean (μ)", showlegend=False
+                ))
+                
+                # 3. Add Mean + Sigma annotation
+                fig_kde.add_annotation(
+                    x=mean_val, y=max(y) * 1.15,
+                    text=f"μ={mean_val:.1f}<br>σ={std_val:.1f}",
+                    showarrow=False,
+                    font=dict(color=color_hex, size=11, family="Arial Black"),
+                    align="center",
+                    bgcolor="white", bordercolor=color_hex, borderwidth=1, borderpad=4
+                )
+
+            fig_kde.update_layout(
+                xaxis_title="Monthly Precipitation (mm)",
+                yaxis_title="Probability Density",
+                hovermode="x unified",
+                height=450,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
             )
-            fig_pdf.update_layout(
-                showlegend=False, xaxis_title="", yaxis_title="Monthly Precipitation (mm)",
-                hovermode="x unified"
-            )
-            st.plotly_chart(fig_pdf, use_container_width=True)
+            st.plotly_chart(fig_kde, use_container_width=True)
 
     st.markdown("---")
 
@@ -181,10 +240,17 @@ with tab_data:
     st.caption("Pearson correlation coefficients between all precipitation products. Higher values (closer to 1.0) indicate stronger linear agreement with the in-situ gauge network.")
     
     corr_df = df[available_plot_cols].corr().round(3)
-    corr_df = corr_df.rename(index={'Gauge_Observed': 'Gauge', 'precip_chirps': 'CHIRPS', 'precip_era5_land': 'ERA5-Land', 'precip_persiann': 'PERSIANN'},
-                             columns={'Gauge_Observed': 'Gauge', 'precip_chirps': 'CHIRPS', 'precip_era5_land': 'ERA5-Land', 'precip_persiann': 'PERSIANN'})
+    corr_df = corr_df.rename(index={
+        'Gauge_Observed': 'Gauge', 'precip_chirps': 'CHIRPS', 
+        'precip_era5_land': 'ERA5-Land', 'precip_persiann': 'PERSIANN'
+    }, columns={
+        'Gauge_Observed': 'Gauge', 'precip_chirps': 'CHIRPS', 
+        'precip_era5_land': 'ERA5-Land', 'precip_persiann': 'PERSIANN'
+    })
     
-    fig_corr = px.imshow(corr_df, text_auto=True, aspect="auto", color_continuous_scale='RdBu_r', zmin=-1, zmax=1, height=400)
+    fig_corr = px.imshow(
+        corr_df, text_auto=True, aspect="auto", color_continuous_scale='RdBu_r', zmin=-1, zmax=1, height=400
+    )
     fig_corr.update_layout(xaxis_title="", yaxis_title="")
     st.plotly_chart(fig_corr, use_container_width=True)
 
@@ -192,9 +258,14 @@ with tab_data:
 
     # 4. Station-Level Peer Comparison Table
     st.markdown("#### 🏆 Station-Level Peer Comparison")
-    st.caption("Aggregate statistics per station. The bar chart below syncs with the table to show measurement counts.")
+    st.caption("Aggregate statistics per station. The bar chart below visualizes measurement counts, which synchronizes with the sortable table to identify stations with high bias or low data completeness.")
     
-    agg_dict = {'Station_Name': ('station_name', 'first'), 'Elevation_m': ('elev_m', 'first'), 'Land_Use': ('Land_Use', 'first'), 'Total_Months': ('date', 'count')}
+    agg_dict = {
+        'Station_Name': ('station_name', 'first'),
+        'Elevation_m': ('elev_m', 'first'),
+        'Land_Use': ('Land_Use', 'first'),
+        'Total_Months': ('date', 'count')
+    }
     if 'Gauge_Observed' in df.columns:
         agg_dict['Mean_Gauge'] = ('Gauge_Observed', 'mean')
         agg_dict['Gauge_Months'] = ('Gauge_Observed', 'count')
@@ -224,12 +295,21 @@ with tab_data:
         }
     else:
         display_cols = ['Station_Name', 'Elevation_m', 'Land_Use', 'Total_Months']
-        column_config = {"Station_Name": "Station Name", "Elevation_m": st.column_config.NumberColumn("Elev. (m)", format="%.1f"), "Land_Use": "Land Use", "Total_Months": "Total Months"}
+        column_config = {
+            "Station_Name": "Station Name", "Elevation_m": st.column_config.NumberColumn("Elev. (m)", format="%.1f"),
+            "Land_Use": "Land Use", "Total_Months": "Total Months"
+        }
 
-    st.bar_chart(station_stats.set_index('Station_Name')['Total_Months'], height=200)
-    st.dataframe(station_stats[display_cols], hide_index=True, use_container_width=True, column_config=column_config)
+    # ✅ TODO RESOLVED: Plot showing measurements per station, synced visually above the table
+    st.bar_chart(station_stats.set_index('Station_Name')['Total_Months'], height=200, color="#4ba3e3")
     
-
+    st.dataframe(
+        station_stats[display_cols],
+        hide_index=True,
+        use_container_width=True,
+        column_config=column_config
+    )
+    
 # ==============================================================================
 # TAB 2: HYDROCLIMATE EXPLORER
 # ==============================================================================
