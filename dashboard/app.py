@@ -254,59 +254,156 @@ with tab_data:
 
     st.markdown("---")
 
-    # 4. Station-Level Peer Comparison Table
+    # 4. Station-Level Peer Comparison (Visual + Tabular Drill-down)
     st.markdown("#### 🏆 Station-Level Peer Comparison")
-    st.caption("Aggregate statistics per station. The bar chart below visualizes measurement counts, which synchronizes with the sortable table to identify stations with high bias or low data completeness.")
+    st.caption("Compare monthly precipitation distributions and aggregate statistics across specific stations. Use the filters to isolate stations of interest.")
     
-    agg_dict = {
-        'Station_Name': ('station_name', 'first'),
-        'Elevation_m': ('elev_m', 'first'),
-        'Land_Use': ('Land_Use', 'first'),
-        'Total_Months': ('date', 'count')
-    }
-    if 'Gauge_Observed' in df.columns:
-        agg_dict['Mean_Gauge'] = ('Gauge_Observed', 'mean')
-        agg_dict['Gauge_Months'] = ('Gauge_Observed', 'count')
-    if 'precip_chirps' in df.columns: agg_dict['Mean_CHIRPS'] = ('precip_chirps', 'mean')
-    if 'precip_era5_land' in df.columns: agg_dict['Mean_ERA5'] = ('precip_era5_land', 'mean')
-    if 'precip_persiann' in df.columns: agg_dict['Mean_PERSIANN'] = ('precip_persiann', 'mean')
-        
-    station_stats = df.groupby('station_id').agg(**agg_dict).reset_index()
+    # A. Station Selection (Unlimited multi-selection with dynamic defaults)
+    all_stations = sorted(df['station_id'].unique())
+    station_dict = df.drop_duplicates('station_id').set_index('station_id')['station_name'].to_dict()
     
-    if 'Gauge_Observed' in df.columns and 'Mean_Gauge' in station_stats.columns:
-        station_stats['Data_Completeness_%'] = (station_stats['Gauge_Months'] / station_stats['Total_Months'] * 100).round(1)
-        if 'Mean_CHIRPS' in station_stats.columns: station_stats['CHIRPS_Bias_%'] = ((station_stats['Mean_CHIRPS'] - station_stats['Mean_Gauge']) / station_stats['Mean_Gauge'] * 100).round(1)
-        if 'Mean_ERA5' in station_stats.columns: station_stats['ERA5_Bias_%'] = ((station_stats['Mean_ERA5'] - station_stats['Mean_Gauge']) / station_stats['Mean_Gauge'] * 100).round(1)
-        if 'Mean_PERSIANN' in station_stats.columns: station_stats['PERSIANN_Bias_%'] = ((station_stats['Mean_PERSIANN'] - station_stats['Mean_Gauge']) / station_stats['Mean_Gauge'] * 100).round(1)
-        
-        display_cols = ['Station_Name', 'Elevation_m', 'Land_Use', 'Mean_Gauge', 'Mean_CHIRPS', 'Mean_ERA5', 'Mean_PERSIANN', 'Data_Completeness_%', 'CHIRPS_Bias_%', 'ERA5_Bias_%', 'PERSIANN_Bias_%']
-        column_config = {
-            "Station_Name": "Station Name", "Elevation_m": st.column_config.NumberColumn("Elev. (m)", format="%.1f"),
-            "Land_Use": "Land Use", "Mean_Gauge": st.column_config.NumberColumn("Mean Gauge (mm)", format="%.1f"),
-            "Mean_CHIRPS": st.column_config.NumberColumn("Mean CHIRPS (mm)", format="%.1f"),
-            "Mean_ERA5": st.column_config.NumberColumn("Mean ERA5 (mm)", format="%.1f"),
-            "Mean_PERSIANN": st.column_config.NumberColumn("Mean PERSIANN (mm)", format="%.1f"),
-            "Data_Completeness_%": st.column_config.ProgressColumn("Gauge Completeness", min_value=0, max_value=100, format="%.1f%%"),
-            "CHIRPS_Bias_%": st.column_config.NumberColumn("CHIRPS Bias (%)", format="%.1f%%", help="Positive = Overestimation vs Gauge"),
-            "ERA5_Bias_%": st.column_config.NumberColumn("ERA5 Bias (%)", format="%.1f%%", help="Positive = Overestimation vs Gauge"),
-            "PERSIANN_Bias_%": st.column_config.NumberColumn("PERSIANN Bias (%)", format="%.1f%%", help="Positive = Overestimation vs Gauge")
-        }
-    else:
-        display_cols = ['Station_Name', 'Elevation_m', 'Land_Use', 'Total_Months']
-        column_config = {
-            "Station_Name": "Station Name", "Elevation_m": st.column_config.NumberColumn("Elev. (m)", format="%.1f"),
-            "Land_Use": "Land Use", "Total_Months": "Total Months"
-        }
-
-    st.bar_chart(station_stats.set_index('Station_Name')['Total_Months'], height=200, color="#4ba3e3")
+    # Default to first 10 stations to prevent initial render overload, but user can select all
+    default_stations = all_stations[:10] 
     
-    st.dataframe(
-        station_stats[display_cols],
-        hide_index=True,
-        use_container_width=True,
-        column_config=column_config
+    selected_station_ids = st.multiselect(
+        "📍 Select Stations to Compare:",
+        options=all_stations,
+        format_func=lambda x: f"{station_dict.get(x, 'Unknown')} ({x})",
+        default=default_stations
     )
     
+    if not selected_station_ids:
+        st.info("👈 Please select at least one station to view the comparison.")
+    else:
+        # Filter the main dataframe for the selected stations
+        df_station_filtered = df[df['station_id'].isin(selected_station_ids)].copy()
+        
+        # B. Data Source Selection for the Boxplot
+        plot_cols = ['Gauge_Observed', 'precip_chirps', 'precip_era5_land', 'precip_persiann']
+        available_plot_cols = [col for col in plot_cols if col in df_station_filtered.columns]
+        
+        source_options = [col for col in ['Gauge_Observed', 'precip_chirps', 'precip_era5_land', 'precip_persiann'] if col in available_plot_cols]
+        
+        selected_box_sources = st.multiselect(
+            "📊 Select Data Sources for Distribution Comparison:",
+            options=source_options,
+            default=source_options
+        )
+        
+        if selected_box_sources:
+            # Melt data for horizontal boxplot
+            df_box = df_station_filtered[['station_id', 'station_name'] + selected_box_sources].melt(
+                id_vars=['station_id', 'station_name'],
+                var_name='Data Source',
+                value_name='Precipitation (mm)'
+            )
+            
+            # Map internal column names to user-friendly display names
+            source_name_map = {
+                'Gauge_Observed': 'In-Situ Gauge (Truth)',
+                'precip_chirps': 'Raw CHIRPS',
+                'precip_era5_land': 'Raw ERA5-Land',
+                'precip_persiann': 'Raw PERSIANN-CDR'
+            }
+            df_box['Data Source'] = df_box['Data Source'].map(source_name_map)
+            
+            # Create a clean display name for the Y-axis
+            df_box['Station_Display'] = df_box['station_name'] + " (" + df_box['station_id'] + ")"
+            
+            # Dynamic height: 50px per station, minimum 400px
+            plot_height = max(400, len(selected_station_ids) * 50)
+            
+            # Horizontal Boxplot
+            fig_box = px.box(
+                df_box,
+                y='Station_Display',
+                x='Precipitation (mm)',
+                color='Data Source',
+                orientation='h',
+                color_discrete_map={
+                    'In-Situ Gauge (Truth)': '#d62728',
+                    'Raw CHIRPS': '#1f77b4',
+                    'Raw ERA5-Land': '#ff7f0e',
+                    'Raw PERSIANN-CDR': '#2ca02c'
+                },
+                points="outliers", # Crucial for hydroclimatology: shows extreme rainfall events
+                height=plot_height
+            )
+            
+            fig_box.update_layout(
+                yaxis_title="Station",
+                xaxis_title="Monthly Precipitation (mm)",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                hovermode="x unified"
+            )
+            st.plotly_chart(fig_box, use_container_width=True)
+        
+        st.markdown("---")
+        
+        # C. Synchronized Tabular Data (Drill-down)
+        st.markdown("##### 📋 Detailed Station Metrics")
+        st.caption("Aggregate statistics for the selected stations. **Click column headers to sort** (e.g., sort by 'CHIRPS Bias (%)' descending to find the worst overestimators).")
+        
+        # 1. Calculate aggregated stats (only for the filtered stations to save compute)
+        agg_dict = {
+            'Station_Name': ('station_name', 'first'),
+            'Elevation_m': ('elev_m', 'first'),
+            'Land_Use': ('Land_Use', 'first'),
+            'Total_Months': ('date', 'count')
+        }
+        if 'Gauge_Observed' in df_station_filtered.columns:
+            agg_dict['Mean_Gauge'] = ('Gauge_Observed', 'mean')
+            agg_dict['Gauge_Months'] = ('Gauge_Observed', 'count')
+        if 'precip_chirps' in df_station_filtered.columns: agg_dict['Mean_CHIRPS'] = ('precip_chirps', 'mean')
+        if 'precip_era5_land' in df_station_filtered.columns: agg_dict['Mean_ERA5'] = ('precip_era5_land', 'mean')
+        if 'precip_persiann' in df_station_filtered.columns: agg_dict['Mean_PERSIANN'] = ('precip_persiann', 'mean')
+            
+        filtered_station_stats = df_station_filtered.groupby('station_id').agg(**agg_dict).reset_index()
+        
+        # 2. Calculate Bias and Completeness
+        if 'Gauge_Observed' in filtered_station_stats.columns and 'Mean_Gauge' in filtered_station_stats.columns:
+            filtered_station_stats['Data_Completeness_%'] = (filtered_station_stats['Gauge_Months'] / filtered_station_stats['Total_Months'] * 100).round(1)
+            if 'Mean_CHIRPS' in filtered_station_stats.columns: 
+                filtered_station_stats['CHIRPS_Bias_%'] = ((filtered_station_stats['Mean_CHIRPS'] - filtered_station_stats['Mean_Gauge']) / filtered_station_stats['Mean_Gauge'] * 100).round(1)
+            if 'Mean_ERA5' in filtered_station_stats.columns: 
+                filtered_station_stats['ERA5_Bias_%'] = ((filtered_station_stats['Mean_ERA5'] - filtered_station_stats['Mean_Gauge']) / filtered_station_stats['Mean_Gauge'] * 100).round(1)
+            if 'Mean_PERSIANN' in filtered_station_stats.columns: 
+                filtered_station_stats['PERSIANN_Bias_%'] = ((filtered_station_stats['Mean_PERSIANN'] - filtered_station_stats['Mean_Gauge']) / filtered_station_stats['Mean_Gauge'] * 100).round(1)
+        
+        # 3. Define Display Columns and Config dynamically
+        display_cols = ['Station_Name', 'Elevation_m', 'Land_Use', 'Total_Months']
+        column_config = {
+            "Station_Name": "Station Name",
+            "Elevation_m": st.column_config.NumberColumn("Elev. (m)", format="%.1f"),
+            "Land_Use": "Land Use",
+            "Total_Months": st.column_config.NumberColumn("Total Months", format="%d"),
+        }
+        
+        if 'Mean_Gauge' in filtered_station_stats.columns:
+            display_cols.extend(['Mean_Gauge', 'Data_Completeness_%'])
+            column_config["Mean_Gauge"] = st.column_config.NumberColumn("Mean Gauge (mm)", format="%.1f")
+            column_config["Data_Completeness_%"] = st.column_config.ProgressColumn("Gauge Completeness", min_value=0, max_value=100, format="%.1f%%")
+            
+        if 'CHIRPS_Bias_%' in filtered_station_stats.columns:
+            display_cols.append('CHIRPS_Bias_%')
+            column_config["CHIRPS_Bias_%"] = st.column_config.NumberColumn("CHIRPS Bias (%)", format="%.1f%%", help="Positive = Overestimation vs Gauge")
+            
+        if 'ERA5_Bias_%' in filtered_station_stats.columns:
+            display_cols.append('ERA5_Bias_%')
+            column_config["ERA5_Bias_%"] = st.column_config.NumberColumn("ERA5 Bias (%)", format="%.1f%%", help="Positive = Overestimation vs Gauge")
+            
+        if 'PERSIANN_Bias_%' in filtered_station_stats.columns:
+            display_cols.append('PERSIANN_Bias_%')
+            column_config["PERSIANN_Bias_%"] = st.column_config.NumberColumn("PERSIANN Bias (%)", format="%.1f%%", help="Positive = Overestimation vs Gauge")
+
+        # 4. Render Synchronized Dataframe
+        st.dataframe(
+            filtered_station_stats[display_cols],
+            hide_index=True,
+            use_container_width=True,
+            column_config=column_config
+        )
+        
 # ==============================================================================
 # TAB 2: HYDROCLIMATE EXPLORER
 # ==============================================================================
