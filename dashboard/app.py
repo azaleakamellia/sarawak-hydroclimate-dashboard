@@ -700,23 +700,33 @@ with tab_ml:
         st.error("⚠️ `sarawak_ML_corrected.parquet` not found. Please run `05_ml_bias_correction.ipynb` first.")
         st.stop()
     
+    # ✅ DEBUG CHECK: Ensure required columns actually exist in the parquet
+    required_cols = ['Gauge_Observed', 'P_merged_hier', 'P_corrected']
+    missing_cols = [col for col in required_cols if col not in df_ml.columns]
+    if missing_cols:
+        st.error(f"⚠️ Missing required columns in parquet: {missing_cols}.")
+        st.write("Available columns in your file:", list(df_ml.columns))
+        st.stop()
+
     # Filter to valid rows
-    valid_ml = df_ml.dropna(subset=['Gauge_Observed', 'P_merged_hier', 'P_corrected']).copy()
+    valid_ml = df_ml.dropna(subset=required_cols).copy()
+
+    if len(valid_ml) < 50:
+        st.warning(f"⚠️ Insufficient valid data for ML evaluation plots. Found only {len(valid_ml)} valid rows after dropping NaNs. Please check your `sarawak_ML_corrected.parquet` data quality.")
+        st.write("Sample of loaded data:", valid_ml.head())
 
     # ✅ FIX #1: The parquet stores only the WINNING model's correction (no 'model_used' column).
-    # Detect this so we never index a missing column.
     HAS_MODEL_COL = 'model_used' in valid_ml.columns
 
-    # ✅ FIX #2: Pick the best model by SORTING the leaderboard (previously iloc[0] was arbitrary).
+    # ✅ FIX #2: Pick the best model by SORTING the leaderboard.
     if not leaderboard.empty and 'Composite_Score' in leaderboard.columns:
         lb_sorted = leaderboard.sort_values('Composite_Score', ascending=False)
-        best_model = lb_sorted.iloc[0]['ML_Model']
+        best_model = str(lb_sorted.iloc[0]['ML_Model'])
     elif not leaderboard.empty and 'ML_Model' in leaderboard.columns:
-        best_model = leaderboard.iloc[0]['ML_Model']
+        best_model = str(leaderboard.iloc[0]['ML_Model'])
     else:
         best_model = 'ML-Corrected'
 
-    # Helper: slice for a model if row-level tags exist, else the whole frame (single winning model).
     def get_model_slice(df, model_name):
         return df[df['model_used'] == model_name] if HAS_MODEL_COL else df
 
@@ -725,9 +735,9 @@ with tab_ml:
     # ==========================================================================
     # 1. TOP-LEVEL METRIC DECOMPOSITION (KGE Components)
     # ==========================================================================
-    st.markdown("#### 📊 1. Aggregate Performance Metrics (Best Model: " + str(best_model) + ")")
+    st.markdown(f"#### 📊 1. Aggregate Performance Metrics (Best Model: {best_model})")
     if not HAS_MODEL_COL:
-        st.caption("ℹ️ The corrected parquet stores a single `P_corrected` column produced by the winning model; per-model row tags are not available. Aggregate metrics below describe that best model; the leaderboard table holds the per-model comparison.")
+        st.caption("ℹ️ The corrected parquet stores a single `P_corrected` column produced by the winning model. Aggregate metrics below describe that best model; the leaderboard table holds the per-model comparison.")
 
     ml_slice = get_model_slice(valid_ml, best_model)
     paired = ml_slice[['Gauge_Observed', 'P_corrected']].dropna()
@@ -755,162 +765,172 @@ with tab_ml:
     st.markdown("---")
 
     # ==========================================================================
-    # 2. VISUAL A: Log-Scale 2D Density Scatter
+    # 2. VISUAL A & B: Distributional Fidelity & Error Decomposition
     # ==========================================================================
     st.markdown("#### 📈 2. Distributional Fidelity & Error Decomposition")
     
-    # Sample for performance (max 20,000 points)
-    sample_size = min(20000, len(valid_ml))
-    df_sample = valid_ml.sample(sample_size, random_state=42)
-    
-    col_a1, col_a2 = st.columns(2)
-    
-    with col_a1:
-        st.markdown("**A. Log-Scale 2D Density Scatter**")
-        st.caption("Hexagonal binning reveals data density. The 1:1 line represents perfect agreement. Note how ML calibration reduces the 'smear' of overestimation at low intensities.")
+    if len(valid_ml) >= 50:
+        sample_size = min(20000, len(valid_ml))
+        df_sample = valid_ml.sample(sample_size, random_state=42)
         
-        fig_density = go.Figure()
+        col_a1, col_a2 = st.columns(2)
         
-        # Add 1:1 line
-        max_val = max(df_sample['Gauge_Observed'].max(), df_sample['P_corrected'].max())
-        fig_density.add_trace(go.Scatter(x=[0, max_val], y=[0, max_val], mode='lines', line=dict(color='red', dash='dash', width=2), name='1:1 Perfect'))
-        
-        # Add 2D Histogram Contour for Calibrated vs Gauge
-        fig_density.add_trace(go.Histogram2dContour(
-            x=df_sample['Gauge_Observed'], y=df_sample['P_corrected'],
-            colorscale='Blues', showscale=True,
-            colorbar=dict(title="Density", x=1.05),
-            name='ML Calibrated Density'
-        ))
-        
-        fig_density.update_layout(
-            height=400,
-            xaxis=dict(title="In-Situ Gauge (mm)", type="log", range=[-1, 3]), # Log scale
-            yaxis=dict(title="ML Calibrated (mm)", type="log", range=[-1, 3]),
-            margin=dict(l=0, r=0, t=0, b=0)
-        )
-        st.plotly_chart(fig_density, use_container_width=True)
-
-    with col_a2:
-        st.markdown("**B. Intensity-Regime Residual Boxplots**")
-        st.caption("Residuals (Calibrated − Gauge) stratified by rainfall intensity. A successful model centers the median near zero across all regimes without compressing heavy extremes.")
-        
-        # Define intensity bins
-        def get_regime(x):
-            if x < 1: return 'Trace (<1 mm)'
-            elif x < 5: return 'Light (1-5 mm)'
-            elif x < 20: return 'Moderate (5-20 mm)'
-            else: return 'Heavy (>20 mm)'
+        with col_a1:
+            st.markdown("**A. Log-Scale 2D Density Scatter**")
+            st.caption("Hexagonal binning reveals data density. The 1:1 line represents perfect agreement.")
             
-        df_sample['Regime'] = df_sample['Gauge_Observed'].apply(get_regime)
-        df_sample['Residual_Calibrated'] = df_sample['P_corrected'] - df_sample['Gauge_Observed']
-        df_sample['Residual_Raw'] = df_sample['P_merged_hier'] - df_sample['Gauge_Observed']
-        
-        # Melt for grouped boxplot
-        df_box_melt = pd.melt(
-            df_sample, 
-            id_vars=['Regime'], 
-            value_vars=['Residual_Raw', 'Residual_Calibrated'],
-            var_name='Model', value_name='Residual (mm)'
-        )
-        df_box_melt['Model'] = df_box_melt['Model'].map({'Residual_Raw': 'Raw TCA', 'Residual_Calibrated': 'ML Calibrated'})
-        
-        # Custom order for regimes
-        regime_order = ['Trace (<1 mm)', 'Light (1-5 mm)', 'Moderate (5-20 mm)', 'Heavy (>20 mm)']
-        
-        fig_box = px.box(
-            df_box_melt, x='Regime', y='Residual (mm)', color='Model',
-            category_orders={'Regime': regime_order},
-            color_discrete_map={'Raw TCA': '#ef553b', 'ML Calibrated': '#00cc96'},
-            points=False # Hide outliers to keep the boxplot clean
-        )
-        fig_box.add_hline(y=0, line_dash="dash", line_color="black", line_width=1.5)
-        fig_box.update_layout(
-            height=400,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-            margin=dict(l=0, r=0, t=0, b=0)
-        )
-        st.plotly_chart(fig_box, use_container_width=True)
+            fig_density = go.Figure()
+            max_val = max(float(df_sample['Gauge_Observed'].max()), float(df_sample['P_corrected'].max()))
+            if max_val > 0:
+                fig_density.add_trace(go.Scatter(x=[0, max_val], y=[0, max_val], mode='lines', line=dict(color='red', dash='dash', width=2), name='1:1 Perfect'))
+                fig_density.add_trace(go.Histogram2dContour(
+                    x=df_sample['Gauge_Observed'], y=df_sample['P_corrected'],
+                    colorscale='Blues', showscale=True,
+                    colorbar=dict(title="Density", x=1.05),
+                    name='ML Calibrated Density'
+                ))
+                fig_density.update_layout(
+                    height=400,
+                    xaxis=dict(title="In-Situ Gauge (mm)", type="log", range=[-1, 3] if max_val > 10 else None),
+                    yaxis=dict(title="ML Calibrated (mm)", type="log", range=[-1, 3] if max_val > 10 else None),
+                    margin=dict(l=0, r=0, t=0, b=0)
+                )
+            else:
+                fig_density.add_annotation(text="No valid data to plot.", showarrow=False)
+            st.plotly_chart(fig_density, use_container_width=True)
+
+        with col_a2:
+            st.markdown("**B. Intensity-Regime Residual Boxplots**")
+            st.caption("Residuals (Calibrated − Gauge) stratified by rainfall intensity.")
+            
+            def get_regime(x):
+                if x < 1: return 'Trace (<1 mm)'
+                elif x < 5: return 'Light (1-5 mm)'
+                elif x < 20: return 'Moderate (5-20 mm)'
+                else: return 'Heavy (>20 mm)'
+                
+            df_sample['Regime'] = df_sample['Gauge_Observed'].apply(get_regime)
+            df_sample['Residual_Calibrated'] = df_sample['P_corrected'] - df_sample['Gauge_Observed']
+            df_sample['Residual_Raw'] = df_sample['P_merged_hier'] - df_sample['Gauge_Observed']
+            
+            df_box_melt = pd.melt(
+                df_sample, 
+                id_vars=['Regime'], 
+                value_vars=['Residual_Raw', 'Residual_Calibrated'],
+                var_name='Model', value_name='Residual (mm)'
+            )
+            df_box_melt['Model'] = df_box_melt['Model'].map({'Residual_Raw': 'Raw TCA', 'Residual_Calibrated': 'ML Calibrated'})
+            
+            regime_order = ['Trace (<1 mm)', 'Light (1-5 mm)', 'Moderate (5-20 mm)', 'Heavy (>20 mm)']
+            
+            fig_box = px.box(
+                df_box_melt, x='Regime', y='Residual (mm)', color='Model',
+                category_orders={'Regime': regime_order},
+                color_discrete_map={'Raw TCA': '#ef553b', 'ML Calibrated': '#00cc96'},
+                points=False
+            )
+            fig_box.add_hline(y=0, line_dash="dash", line_color="black", line_width=1.5)
+            fig_box.update_layout(
+                height=400,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                margin=dict(l=0, r=0, t=0, b=0)
+            )
+            st.plotly_chart(fig_box, use_container_width=True)
+    else:
+        st.info("⚠️ Insufficient data to render distributional fidelity plots (requires ≥ 50 valid rows).")
 
     st.markdown("---")
 
     # ==========================================================================
     # 3. VISUAL C & D: Upper-Tail ECDF & Station-Level KGE vs Elevation
     # ==========================================================================
-    col_c1, col_d1 = st.columns(2)
-    
-    with col_c1:
-        st.markdown("**C. Upper-Tail Empirical CDF (ECDF)**")
-        st.caption("Compares the cumulative distribution of rainfall. Divergence at the upper tail (right side) indicates attenuation of extreme convective events.")
+    if len(valid_ml) >= 50:
+        col_c1, col_d1 = st.columns(2)
         
-        # Sample specifically for ECDF to ensure smooth curves
-        df_ecdf = valid_ml[['Gauge_Observed', 'P_merged_hier', 'P_corrected']].sample(min(30000, len(valid_ml)), random_state=42)
-        
-        fig_ecdf = px.ecdf(
-            df_ecdf.melt(var_name='Product', value_name='Precipitation (mm)'),
-            x='Precipitation (mm)', color='Product',
-            color_discrete_map={'Gauge_Observed': '#d62728', 'P_merged_hier': '#ef553b', 'P_corrected': '#00cc96'},
-            labels={'Product': 'Data Source'}
-        )
-        # Focus on the upper tail (e.g., > 10mm) by setting x-axis range, but keep full data for calculation
-        fig_ecdf.update_layout(
-            height=400,
-            xaxis=dict(title="Precipitation (mm)", type="log"),
-            yaxis=dict(title="Cumulative Probability"),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-        )
-        st.plotly_chart(fig_ecdf, use_container_width=True)
+        with col_c1:
+            st.markdown("**C. Upper-Tail Empirical CDF (ECDF)**")
+            st.caption("Compares the cumulative distribution of rainfall.")
+            
+            df_ecdf = valid_ml[['Gauge_Observed', 'P_merged_hier', 'P_corrected']].sample(min(30000, len(valid_ml)), random_state=42)
+            
+            fig_ecdf = px.ecdf(
+                df_ecdf.melt(var_name='Product', value_name='Precipitation (mm)'),
+                x='Precipitation (mm)', color='Product',
+                color_discrete_map={'Gauge_Observed': '#d62728', 'P_merged_hier': '#ef553b', 'P_corrected': '#00cc96'},
+                labels={'Product': 'Data Source'}
+            )
+            fig_ecdf.update_layout(
+                height=400,
+                xaxis=dict(title="Precipitation (mm)", type="log"),
+                yaxis=dict(title="Cumulative Probability"),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            )
+            st.plotly_chart(fig_ecdf, use_container_width=True)
 
-    with col_d1:
-        st.markdown("**D. Station-Level KGE vs. Elevation Gradient**")
-        st.caption("Evaluates spatial generalization. A flat trendline indicates the ML model successfully corrects biases across both coastal lowlands and highland orographic zones.")
-        
-        # Calculate station-level KGE
-        station_kge = []
-        for stn_id, group in valid_ml.groupby('station_id'):
-            if len(group) < 50: continue
-            g = group['Gauge_Observed']
-            c = group['P_corrected']
-            r = np.corrcoef(g, c)[0, 1]
-            a = np.std(c) / np.std(g)
-            b = np.mean(c) / np.mean(g)
-            k = 1 - np.sqrt((r - 1)**2 + (a - 1)**2 + (b - 1)**2)
+        with col_d1:
+            st.markdown("**D. Station-Level KGE vs. Elevation Gradient**")
+            st.caption("Evaluates spatial generalization. A flat trendline indicates successful bias correction across zones.")
             
-            elev = group['elev_m'].iloc[0]
-            station_kge.append({'station_id': stn_id, 'Elevation (m)': elev, 'KGE': k})
+            station_kge = []
+            for stn_id, group in valid_ml.groupby('station_id'):
+                if len(group) < 50: continue
+                g = group['Gauge_Observed']
+                c = group['P_corrected']
+                r = np.corrcoef(g, c)[0, 1]
+                a = np.std(c) / np.std(g)
+                b = np.mean(c) / np.mean(g)
+                k = 1 - np.sqrt((r - 1)**2 + (a - 1)**2 + (b - 1)**2)
+                
+                elev = float(group['elev_m'].iloc[0]) if 'elev_m' in group.columns else 0.0
+                station_kge.append({'station_id': stn_id, 'Elevation (m)': elev, 'KGE': float(k)})
+                
+            df_kge = pd.DataFrame(station_kge)
             
-        df_kge = pd.DataFrame(station_kge)
-        
-        fig_kge = px.scatter(
-            df_kge, x='Elevation (m)', y='KGE', 
-            trendline="ols", trendline_color_override="red",
-            marginal_x="histogram",
-            labels={'KGE': 'Station-Level KGE'}
-        )
-        fig_kge.update_layout(
-            height=400,
-            xaxis=dict(title="Station Elevation (m)"),
-            yaxis=dict(title="KGE", range=[-0.5, 1.0])
-        )
-        st.plotly_chart(fig_kge, use_container_width=True)
+            if len(df_kge) > 1:
+                # ✅ FIX: Manual OLS trendline to completely avoid 'statsmodels' dependency crash
+                coeffs = np.polyfit(df_kge['Elevation (m)'], df_kge['KGE'], 1)
+                trend_x = np.array([df_kge['Elevation (m)'].min(), df_kge['Elevation (m)'].max()])
+                trend_y = np.polyval(coeffs, trend_x)
+                
+                fig_kge = px.scatter(
+                    df_kge, x='Elevation (m)', y='KGE', 
+                    marginal_x="histogram",
+                    labels={'KGE': 'Station-Level KGE'}
+                )
+                # Add the manual trendline
+                fig_kge.add_trace(go.Scatter(
+                    x=trend_x, y=trend_y, mode='lines', name='OLS Trendline',
+                    line=dict(color='red', dash='dash', width=2)
+                ))
+                fig_kge.update_layout(
+                    height=400,
+                    xaxis=dict(title="Station Elevation (m)"),
+                    yaxis=dict(title="KGE", range=[-0.5, 1.0])
+                )
+            else:
+                fig_kge = go.Figure()
+                fig_kge.add_annotation(text="Insufficient station data (need ≥50 months per station) to plot KGE vs Elevation.", showarrow=False)
+                
+            st.plotly_chart(fig_kge, use_container_width=True)
+    else:
+        st.info("⚠️ Insufficient data to render ECDF and KGE plots.")
 
     st.markdown("---")
 
     # ==========================================================================
-    # 4. VISUAL E: Polar Taylor Diagram (Retained & Refined)
+    # 4. VISUAL E: Polar Taylor Diagram
     # ==========================================================================
     st.markdown("#### 📐 3. Unified Taylor Diagram")
-    st.caption("Summarizes centered RMSE, standard deviation, and Pearson correlation on a single polar plot. The red star is the perfect reference. Points closer to the star indicate superior performance.")
+    st.caption("Summarizes centered RMSE, standard deviation, and Pearson correlation on a single polar plot.")
     
     all_taylor_products = {
         'precip_chirps': 'CHIRPS (Raw)', 'precip_persiann': 'PERSIANN-CDR (Raw)', 'precip_era5_land': 'ERA5-Land (Raw)',
         'P_merged_global': 'P_merged (Global)', 'P_merged_hier': 'P_merged (Hierarchical)', 'P_corrected': 'ML-Corrected'
     }
     
-    # ✅ FIX #3: Use the same model-slice fallback (no 'model_used' column crash).
     df_taylor = get_model_slice(valid_ml, best_model).copy()
     obs = df_taylor['Gauge_Observed']
-    obs_std = np.std(obs)
+    obs_std = float(np.std(obs))
     
     product_defs = {
         'precip_chirps': {'label': 'CHIRPS', 'symbol': 'circle-open', 'color': '#1f77b4'},
@@ -932,58 +952,56 @@ with tab_ml:
         est = est.loc[common_idx]
         obs_v = obs_aligned.loc[common_idx]
         
-        r = np.corrcoef(obs_v, est)[0, 1]
-        std_norm = np.std(est) / obs_std
-        rmsd = np.sqrt(np.mean((est - obs_v)**2)) / obs_std
+        r = float(np.corrcoef(obs_v, est)[0, 1])
+        std_norm = float(np.std(est) / obs_std)
+        rmsd = float(np.sqrt(np.mean((est - obs_v)**2)) / obs_std)
         
         taylor_df = pd.concat([taylor_df, pd.DataFrame([{'Product': info['label'], 'R': r, 'Std': std_norm, 'RMSD': rmsd, 'Color': info['color'], 'Symbol': info['symbol']}])], ignore_index=True)
     
-    fig_taylor = go.Figure()
-    rmsd_color, corr_color, std_color, grid_color = '#006400', '#2F4F4F', '#4B0082', '#696969'
-    max_std = max(taylor_df['Std'].max(), 1.5) * 1.2 if not taylor_df.empty else 2.0
-    theta = np.linspace(0, np.pi/2, 100)
-    
-    # RMSD arcs
-    for rmsd_val in [0.5, 1.0, 1.5]:
-        if rmsd_val < max_std * 1.5:
-            x_arc = 1 + rmsd_val * np.cos(np.pi - theta)
-            y_arc = rmsd_val * np.sin(np.pi - theta)
-            mask = (x_arc >= 0) & (x_arc <= max_std) & (y_arc >= 0) & (y_arc <= max_std)
-            fig_taylor.add_trace(go.Scatter(x=x_arc[mask], y=y_arc[mask], mode='lines', line=dict(color=rmsd_color, dash='dash', width=1.5), name=f'RMSD={rmsd_val}', showlegend=False))
-            label_theta = np.pi / 4
-            fig_taylor.add_annotation(x=1 + rmsd_val * np.cos(np.pi - label_theta), y=rmsd_val * np.sin(np.pi - label_theta), text=f'{rmsd_val}', showarrow=False, font=dict(size=10, color=rmsd_color), textangle=45, xanchor='center', yanchor='middle', bgcolor='rgba(255,255,255,0.9)', borderpad=2)
-    
-    # Correlation lines
-    for r_val in [0.5, 0.7, 0.8, 0.9, 0.95, 0.99]:
-        angle = np.arccos(r_val)
-        fig_taylor.add_trace(go.Scatter(x=[0, max_std * np.cos(angle)], y=[0, max_std * np.sin(angle)], mode='lines', line=dict(color=corr_color, width=1.5, dash='dash'), showlegend=False))
-        fig_taylor.add_annotation(x=max_std * 0.92 * np.cos(angle), y=max_std * 0.92 * np.sin(angle), text=f'{r_val}', showarrow=False, font=dict(size=10, color='#000000'), textangle=np.degrees(angle) - 90)
-    
-    # Std arcs
-    for std_val in [0.5, 1.0, 1.5]:
-        if std_val <= max_std:
-            theta_circle = np.linspace(0, np.pi/2, 100)
-            fig_taylor.add_trace(go.Scatter(x=std_val * np.cos(theta_circle), y=std_val * np.sin(theta_circle), mode='lines', line=dict(color=std_color, width=1.5, dash='dot'), showlegend=False))
-    
-    # Reference point
-    fig_taylor.add_trace(go.Scatter(x=[1], y=[0], mode='markers+text', marker=dict(size=14, color='red', symbol='star'), name='Reference (Perfect)', text=['Reference'], textposition='bottom center'))
-    
-    # Plot products
-    for _, row in taylor_df.iterrows():
-        y_val = row['Std'] * np.sin(np.arccos(row['R']))
-        fig_taylor.add_trace(go.Scatter(x=[row['Std']], y=[y_val], mode='markers+text', marker=dict(size=12, color=row['Color'], symbol=row['Symbol'], line=dict(width=2, color=row['Color']), opacity=1.0), name=row['Product'], text=[f"{row['Product'][:10]}"], textposition='top center', textfont=dict(size=12, color='#000000'), hovertemplate=f"Product: {row['Product']}<br>R: {row['R']:.3f}<br>Std: {row['Std']:.3f}<br>RMSD: {row['RMSD']:.3f}<extra></extra>"))
-    
-    fig_taylor.update_layout(
-        height=600,
-        xaxis=dict(title=dict(text='Normalized Standard Deviation', font=dict(size=14, color='#000000')), range=[0, max_std], zeroline=True, zerolinecolor='#000000', zerolinewidth=1.5, showgrid=True, gridcolor=grid_color, gridwidth=1, showline=True, linecolor='#000000', linewidth=1.5, ticks='outside', tickcolor='#000000', tickwidth=1.5, showticklabels=True, tickfont=dict(size=12, color='#000000')),
-        yaxis=dict(title=dict(text='Normalized Standard Deviation', font=dict(size=14, color='#000000')), range=[0, max_std], zeroline=True, zerolinecolor='#000000', zerolinewidth=1.5, showgrid=True, gridcolor=grid_color, gridwidth=1, showline=True, linecolor='#000000', linewidth=1.5, ticks='outside', tickcolor='#000000', tickwidth=1.5, showticklabels=True, tickfont=dict(size=12, color='#000000'), scaleanchor="x", scaleratio=1),
-        legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.05, font=dict(size=12, color='#000000'), bgcolor='rgba(255,255,255,0.95)', bordercolor='#000000', borderwidth=1),
-        showlegend=True, plot_bgcolor='rgba(255,255,255,1)', paper_bgcolor='rgba(255,255,255,1)', margin=dict(l=80, r=40, t=80, b=80)
-    )
-    fig_taylor.add_annotation(x=max_std * 0.85, y=max_std * 0.5, text="Correlation", showarrow=False, font=dict(size=12, color='#000000'), textangle=-30)
-    fig_taylor.add_annotation(x=1, y=-0.1, text="Reference", showarrow=False, font=dict(size=12, color='#000000'))
-    
-    st.plotly_chart(fig_taylor, use_container_width=True)
+    if not taylor_df.empty:
+        fig_taylor = go.Figure()
+        rmsd_color, corr_color, std_color, grid_color = '#006400', '#2F4F4F', '#4B0082', '#696969'
+        max_std = max(float(taylor_df['Std'].max()), 1.5) * 1.2
+        theta = np.linspace(0, np.pi/2, 100)
+        
+        for rmsd_val in [0.5, 1.0, 1.5]:
+            if rmsd_val < max_std * 1.5:
+                x_arc = 1 + rmsd_val * np.cos(np.pi - theta)
+                y_arc = rmsd_val * np.sin(np.pi - theta)
+                mask = (x_arc >= 0) & (x_arc <= max_std) & (y_arc >= 0) & (y_arc <= max_std)
+                fig_taylor.add_trace(go.Scatter(x=x_arc[mask], y=y_arc[mask], mode='lines', line=dict(color=rmsd_color, dash='dash', width=1.5), name=f'RMSD={rmsd_val}', showlegend=False))
+                label_theta = np.pi / 4
+                fig_taylor.add_annotation(x=1 + rmsd_val * np.cos(np.pi - label_theta), y=rmsd_val * np.sin(np.pi - label_theta), text=f'{rmsd_val}', showarrow=False, font=dict(size=10, color=rmsd_color), textangle=45, xanchor='center', yanchor='middle', bgcolor='rgba(255,255,255,0.9)', borderpad=2)
+        
+        for r_val in [0.5, 0.7, 0.8, 0.9, 0.95, 0.99]:
+            angle = np.arccos(r_val)
+            fig_taylor.add_trace(go.Scatter(x=[0, max_std * np.cos(angle)], y=[0, max_std * np.sin(angle)], mode='lines', line=dict(color=corr_color, width=1.5, dash='dash'), showlegend=False))
+            fig_taylor.add_annotation(x=max_std * 0.92 * np.cos(angle), y=max_std * 0.92 * np.sin(angle), text=f'{r_val}', showarrow=False, font=dict(size=10, color='#000000'), textangle=np.degrees(angle) - 90)
+        
+        for std_val in [0.5, 1.0, 1.5]:
+            if std_val <= max_std:
+                theta_circle = np.linspace(0, np.pi/2, 100)
+                fig_taylor.add_trace(go.Scatter(x=std_val * np.cos(theta_circle), y=std_val * np.sin(theta_circle), mode='lines', line=dict(color=std_color, width=1.5, dash='dot'), showlegend=False))
+        
+        fig_taylor.add_trace(go.Scatter(x=[1], y=[0], mode='markers+text', marker=dict(size=14, color='red', symbol='star'), name='Reference (Perfect)', text=['Reference'], textposition='bottom center'))
+        
+        for _, row in taylor_df.iterrows():
+            y_val = row['Std'] * np.sin(np.arccos(row['R']))
+            fig_taylor.add_trace(go.Scatter(x=[row['Std']], y=[y_val], mode='markers+text', marker=dict(size=12, color=row['Color'], symbol=row['Symbol'], line=dict(width=2, color=row['Color']), opacity=1.0), name=row['Product'], text=[f"{row['Product'][:10]}"], textposition='top center', textfont=dict(size=12, color='#000000'), hovertemplate=f"Product: {row['Product']}<br>R: {row['R']:.3f}<br>Std: {row['Std']:.3f}<br>RMSD: {row['RMSD']:.3f}<extra></extra>"))
+        
+        fig_taylor.update_layout(
+            height=600,
+            xaxis=dict(title=dict(text='Normalized Standard Deviation', font=dict(size=14, color='#000000')), range=[0, max_std], zeroline=True, zerolinecolor='#000000', zerolinewidth=1.5, showgrid=True, gridcolor=grid_color, gridwidth=1, showline=True, linecolor='#000000', linewidth=1.5, ticks='outside', tickcolor='#000000', tickwidth=1.5, showticklabels=True, tickfont=dict(size=12, color='#000000')),
+            yaxis=dict(title=dict(text='Normalized Standard Deviation', font=dict(size=14, color='#000000')), range=[0, max_std], zeroline=True, zerolinecolor='#000000', zerolinewidth=1.5, showgrid=True, gridcolor=grid_color, gridwidth=1, showline=True, linecolor='#000000', linewidth=1.5, ticks='outside', tickcolor='#000000', tickwidth=1.5, showticklabels=True, tickfont=dict(size=12, color='#000000'), scaleanchor="x", scaleratio=1),
+            legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.05, font=dict(size=12, color='#000000'), bgcolor='rgba(255,255,255,0.95)', bordercolor='#000000', borderwidth=1),
+            showlegend=True, plot_bgcolor='rgba(255,255,255,1)', paper_bgcolor='rgba(255,255,255,1)', margin=dict(l=80, r=40, t=80, b=80)
+        )
+        fig_taylor.add_annotation(x=max_std * 0.85, y=max_std * 0.5, text="Correlation", showarrow=False, font=dict(size=12, color='#000000'), textangle=-30)
+        fig_taylor.add_annotation(x=1, y=-0.1, text="Reference", showarrow=False, font=dict(size=12, color='#000000'))
+        
+        st.plotly_chart(fig_taylor, use_container_width=True)
+    else:
+        st.info("⚠️ Insufficient data to render Taylor Diagram.")
     
     st.info("💡 **Note on Advanced Diagnostics:** Spatial decorrelation variograms and Leave-One-Station-Out (LOSO) cross-validation metrics are computationally intensive. They have been pre-computed and are documented in the thesis appendix to prove the absence of spatial memorization.")
 
