@@ -197,13 +197,21 @@ with tab_data:
             'Raw ERA5-Land': '#ff7f0e',
             'Raw PERSIANN-CDR': '#2ca02c'
         }
-        def rgba(h, a):
-            n = int(h[1:], 16)
+        # Helper function to convert hex to rgba for fills
+        def get_rgba(h, a):
+            n = int(h.lstrip('#'), 16)
             return f"rgba({(n>>16)&255},{(n>>8)&255},{n&255},{a})"
 
+        # Define colors
+        color_map_hex = {
+            'In-Situ Gauge (Truth)': '#d62728',
+            'Raw CHIRPS': '#1f77b4',
+            'Raw ERA5-Land': '#ff7f0e',
+            'Raw PERSIANN-CDR': '#2ca02c'
+        }
+
         if viz_mode.startswith("Ridge"):
-            # Overlap factor: 0.55 gives a nice balance between separation and the "ridge" look
-            overlap = 0.55 
+            overlap = 0.55  # Controls the vertical spacing between ridges
             fig = go.Figure()
             tickvals, ticktext = [], []
             
@@ -212,24 +220,26 @@ with tab_data:
                 off = i * overlap
                 tickvals.append(off)
                 ticktext.append(source)
-                hexc = color_hex[source]
+                
+                # ✅ FIX: Look up the specific hex string for this source
+                hexc = color_map_hex.get(source, '#636efa') 
 
-                # 1. Baseline separator (thin gray line)
+                # 1. Baseline separator (thin light line for dark mode)
                 fig.add_trace(go.Scatter(
                     x=x, y=[off]*len(x), mode='lines',
-                    line=dict(width=1, color='rgba(255,255,255,0.2)'), # Light gray for dark mode
+                    line=dict(width=1, color='rgba(255,255,255,0.2)'),
                     hoverinfo='skip', showlegend=False
                 ))
                 
-                # 2. Filled Ridge (Opacity reduced slightly to 0.7 for better blending)
+                # 2. Filled Ridge
                 fig.add_trace(go.Scatter(
                     x=x, y=off + d['y'], mode='lines', name=source,
                     line=dict(color=hexc, width=2),
-                    fill='tonexty', fillcolor=rgba(hexc, 0.7),
+                    fill='tonexty', fillcolor=get_rgba(hexc, 0.7),
                     hovertemplate=f"<b>{source}</b><br>Precip: %{{x:.1f}} mm<br><extra></extra>"
                 ))
                 
-                # 3. Mean Line (Changed to WHITE for visibility against dark fills)
+                # 3. Mean Line (White for contrast against dark fills)
                 fig.add_trace(go.Scatter(
                     x=[d['mean'], d['mean']], y=[off, off + 1.0], mode='lines',
                     line=dict(color='white', dash='dash', width=2),
@@ -237,23 +247,21 @@ with tab_data:
                 ))
                 
                 # 4. Annotation (Standardized with Overlaid KDE style)
-                # Positioned just above the peak of the ridge to avoid overlapping the curve
                 fig.add_annotation(
                     x=d['mean'], y=off + 1.05, 
                     text=f"μ={d['mean']:.0f} σ={d['std']:.0f}",
                     showarrow=False, 
-                    # Font color inherited from the plot color for consistency
-                    font=dict(size=10, color=color_hex, family="Arial Black"),
+                    # ✅ FIX: Use the specific hex string, not the dictionary
+                    font=dict(size=10, color=hexc, family="Arial Black"),
                     align="center",
-                    # Soft white background for readability in dark mode
                     bgcolor='rgba(255,255,255,0.9)', 
-                    # Border color inherited from the plot color
-                    bordercolor=color_hex, 
+                    bordercolor=hexc, 
                     borderwidth=1, 
-                    borderpad=3
+                    borderpad=3,
+                    yanchor='bottom'
                 )
 
-            # Layout Fixes for Dark Mode
+            # Layout Fixes for Dark Mode & Readability
             fig.update_layout(
                 height=max(400, len(kde_store) * 120),
                 plot_bgcolor='rgba(0,0,0,0)',   # Transparent background
@@ -262,7 +270,7 @@ with tab_data:
                 xaxis=dict(
                     title="Monthly Precipitation (mm)", 
                     range=[0, x_max],
-                    gridcolor='rgba(255,255,255,0.1)', # Faint grid lines
+                    gridcolor='rgba(255,255,255,0.1)', 
                     zerolinecolor='rgba(255,255,255,0.2)'
                 ),
                 yaxis=dict(
