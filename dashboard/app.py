@@ -160,75 +160,103 @@ with tab_data:
             import numpy as np
             from scipy import stats
             import plotly.graph_objects as go
+            from plotly.subplots import make_subplots
             
-            fig_kde = go.Figure()
+            # We use a vertical stack (N rows, 1 column) for perfect X-axis alignment
+            num_sources = len(selected_sources)
+            row_heights = [0.25] * num_sources # Equal height for each row
+            
+            fig_kde = make_subplots(
+                rows=num_sources, cols=1,
+                shared_xaxes=True,
+                shared_yaxes=True,
+                vertical_spacing=0.05,
+                row_heights=row_heights
+            )
             
             color_map = {
-                'In-Situ Gauge (Truth)': ('#d62728', 'rgba(214, 39, 40, 0.15)'),
-                'Raw CHIRPS': ('#1f77b4', 'rgba(31, 119, 180, 0.15)'),
-                'Raw ERA5-Land': ('#ff7f0e', 'rgba(255, 127, 14, 0.15)'),
-                'Raw PERSIANN-CDR': ('#2ca02c', 'rgba(44, 160, 44, 0.15)')
+                'In-Situ Gauge (Truth)': '#d62728',
+                'Raw CHIRPS': '#1f77b4',
+                'Raw ERA5-Land': '#ff7f0e',
+                'Raw PERSIANN-CDR': '#2ca02c'
             }
             
-            # ✅ FIX: Loop directly instead of using groupby().apply() to avoid Pandas index-dropping bugs
+            # Determine global X and Y ranges for consistent scaling across all facets
+            all_x = []
+            all_y = []
+            kde_data = {}
+            
             for source in selected_sources:
-                # Directly filter the melted dataframe for this source
                 source_data = df_melted[df_melted['Data Source'] == source]['Precipitation (mm)'].dropna()
+                if len(source_data) < 2: continue
                 
-                if len(source_data) < 2:
-                    continue
-                    
-                # Subsample for lightning-fast KDE computation without losing distribution shape
+                # Subsample for speed
                 if len(source_data) > 10000:
                     source_data = source_data.sample(10000, random_state=42)
                 
-                # Calculate KDE
                 kde = stats.gaussian_kde(source_data)
-                
-                # Use 1st to 99th percentile to avoid extreme outliers stretching the plot
                 x_min = source_data.quantile(0.01)
                 x_max = source_data.quantile(0.99)
                 x = np.linspace(x_min, x_max, 500)
                 y = kde(x)
                 
-                # Calculate stats
-                mean_val = float(np.mean(source_data))
-                std_val = float(np.std(source_data))
+                kde_data[source] = {'x': x, 'y': y, 'mean': float(np.mean(source_data)), 'std': float(np.std(source_data))}
+                all_x.extend(x)
+                all_y.extend(y)
+            
+            global_x_min, global_x_max = min(all_x), max(all_x)
+            global_y_max = max(all_y) * 1.2 # 20% headroom for annotations
+            
+            # Now plot each source in its own row
+            for row_idx, source in enumerate(selected_sources, start=1):
+                if source not in kde_data: continue
                 
-                color_hex, color_rgba = color_map.get(source, ('#636efa', 'rgba(99, 110, 250, 0.15)'))
+                data = kde_data[source]
+                color_hex = color_map.get(source, '#636efa')
+                color_rgba = color_hex.replace(')', ', 0.15)').replace('rgb', 'rgba') # Quick hack for rgba
                 
-                # 1. Add KDE filled area
+                # 1. Add KDE filled area to specific row
                 fig_kde.add_trace(go.Scatter(
-                    x=x, y=y, mode='lines', name=source,
+                    x=data['x'], y=data['y'], mode='lines', name=source,
                     line=dict(color=color_hex, width=2.5),
                     fill='tozeroy', fillcolor=color_rgba,
                     hovertemplate=f"<b>{source}</b><br>Precip: %{{x:.1f}} mm<br>Density: %{{y:.4f}}<extra></extra>"
-                ))
+                ), row=row_idx, col=1)
                 
                 # 2. Add Mean (μ) vertical line
                 fig_kde.add_trace(go.Scatter(
-                    x=[mean_val, mean_val], y=[0, max(y) * 1.1], mode='lines',
+                    x=[data['mean'], data['mean']], y=[0, global_y_max], mode='lines',
                     line=dict(color=color_hex, dash='dash', width=2),
                     name=f"{source} Mean (μ)", showlegend=False
-                ))
+                ), row=row_idx, col=1)
                 
-                # 3. Add Mean + Sigma annotation
+                # 3. Add Mean + Sigma annotation inside the subplot
                 fig_kde.add_annotation(
-                    x=mean_val, y=max(y) * 1.15,
-                    text=f"μ={mean_val:.1f}<br>σ={std_val:.1f}",
+                    x=data['mean'], y=global_y_max * 0.85, # Positioned near the top of each subplot
+                    text=f"μ={data['mean']:.1f}<br>σ={data['std']:.1f}",
                     showarrow=False,
                     font=dict(color=color_hex, size=11, family="Arial Black"),
                     align="center",
-                    bgcolor="white", bordercolor=color_hex, borderwidth=1, borderpad=4
+                    bgcolor="white", bordercolor=color_hex, borderwidth=1, borderpad=4,
+                    row=row_idx, col=1
                 )
+                
+                # Add source name as a subplot title (y-axis label alternative)
+                fig_kde.update_yaxes(title_text=source, row=row_idx, col=1, title_standoff=10)
 
+            # Final Layout Tweaks
             fig_kde.update_layout(
-                xaxis_title="Monthly Precipitation (mm)",
-                yaxis_title="Probability Density",
+                height=max(400, num_sources * 200), # Dynamically scale height
                 hovermode="x unified",
-                height=450,
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                showlegend=False, # Legend is redundant since Y-axis labels are the names
+                xaxis_title="Monthly Precipitation (mm)",
+                xaxis=dict(range=[global_x_min, global_x_max])
             )
+            
+            # Remove inner Y-axis ticks/labels for a cleaner look, keep only the title
+            for i in range(1, num_sources + 1):
+                fig_kde.update_yaxes(showticklabels=False, row=i, col=1)
+            
             st.plotly_chart(fig_kde, use_container_width=True)
 
     st.markdown("---")
