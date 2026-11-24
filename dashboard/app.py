@@ -202,9 +202,11 @@ with tab_data:
             return f"rgba({(n>>16)&255},{(n>>8)&255},{n&255},{a})"
 
         if viz_mode.startswith("Ridge"):
-            overlap = 0.45  # vertical spacing between ridge baselines (tune 0.35-0.6)
+            # Overlap factor: 0.55 gives a nice balance between separation and the "ridge" look
+            overlap = 0.55 
             fig = go.Figure()
             tickvals, ticktext = [], []
+            
             for i, source in enumerate(kde_store):
                 d = kde_store[source]
                 off = i * overlap
@@ -212,40 +214,65 @@ with tab_data:
                 ticktext.append(source)
                 hexc = color_hex[source]
 
-                # baseline (thin separator, like the reference image)
+                # 1. Baseline separator (thin gray line)
                 fig.add_trace(go.Scatter(
                     x=x, y=[off]*len(x), mode='lines',
-                    line=dict(width=0.5, color='rgba(0,0,0,0.15)'),
+                    line=dict(width=1, color='rgba(255,255,255,0.2)'), # Light gray for dark mode
                     hoverinfo='skip', showlegend=False
                 ))
-                # filled ridge (tonexty -> fills down to its own baseline)
+                
+                # 2. Filled Ridge (Opacity reduced slightly to 0.7 for better blending)
                 fig.add_trace(go.Scatter(
                     x=x, y=off + d['y'], mode='lines', name=source,
-                    line=dict(color=hexc, width=1.5),
-                    fill='tonexty', fillcolor=rgba(hexc, 0.8),
+                    line=dict(color=hexc, width=2),
+                    fill='tonexty', fillcolor=rgba(hexc, 0.7),
                     hovertemplate=f"<b>{source}</b><br>Precip: %{{x:.1f}} mm<br><extra></extra>"
                 ))
-                # dashed mean line + compact μ/σ label
+                
+                # 3. Mean Line (Changed to WHITE for visibility against dark fills)
                 fig.add_trace(go.Scatter(
-                    x=[d['mean'], d['mean']], y=[off - 0.03, off + 1.05], mode='lines',
-                    line=dict(color='black', dash='dash', width=1.2),
+                    x=[d['mean'], d['mean']], y=[off, off + 1.0], mode='lines',
+                    line=dict(color='white', dash='dash', width=2),
                     hoverinfo='skip', showlegend=False
                 ))
+                
+                # 4. Annotation (Moved to BASELINE y=off+0.05 to avoid overlapping the curve above)
+                # Added a white background box so text is readable even if it touches the curve
                 fig.add_annotation(
-                    x=d['mean'], y=off + 1.05,
-                    text=f"μ={d['mean']:.0f} σ={d['std']:.0f}",
-                    showarrow=False, font=dict(size=9, color=hexc),
+                    x=d['mean'], y=off + 0.08, # Positioned just above the baseline
+                    text=f"μ:{d['mean']:.0f} σ:{d['std']:.0f}",
+                    showarrow=False, 
+                    font=dict(size=10, color='black', family="Arial Black"),
+                    bgcolor='rgba(255,255,255,0.9)', # White box for readability
+                    bordercolor=hexc, 
+                    borderwidth=1, 
+                    borderpad=3,
                     yanchor='bottom'
                 )
 
+            # Layout Fixes for Dark Mode
             fig.update_layout(
-                height=max(420, len(kde_store) * 110),
-                xaxis=dict(title="Monthly Precipitation (mm)", range=[0, x_max]),
-                yaxis=dict(tickvals=tickvals, ticktext=ticktext,
-                           range=[-0.1, (len(kde_store)-1)*overlap + 1.15],
-                           showgrid=False, zeroline=False),
-                hovermode='closest', showlegend=False,
-                plot_bgcolor='white'
+                height=max(400, len(kde_store) * 120),
+                plot_bgcolor='rgba(0,0,0,0)',   # Transparent background
+                paper_bgcolor='rgba(0,0,0,0)',  # Transparent paper
+                font=dict(color='white'),       # White text for axis labels
+                xaxis=dict(
+                    title="Monthly Precipitation (mm)", 
+                    range=[0, x_max],
+                    gridcolor='rgba(255,255,255,0.1)', # Faint grid lines
+                    zerolinecolor='rgba(255,255,255,0.2)'
+                ),
+                yaxis=dict(
+                    tickvals=tickvals, 
+                    ticktext=ticktext,
+                    range=[-0.1, (len(kde_store)-1)*overlap + 1.1],
+                    showgrid=False, 
+                    zeroline=False,
+                    tickfont=dict(size=12, color='white')
+                ),
+                hovermode='closest', 
+                showlegend=False,
+                margin=dict(l=150, r=20, t=20, b=50) # Extra left margin for station names
             )
             st.plotly_chart(fig, use_container_width=True)
 
