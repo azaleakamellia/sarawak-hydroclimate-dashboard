@@ -599,18 +599,27 @@ with tab_explore:
                     st.plotly_chart(fig, use_container_width=True)
 
 # ==============================================================================
-# TAB 3: TCA WEIGHT ANALYSIS (OPTIMIZED)
+# TAB 3: TCA WEIGHT ANALYSIS (OPTIMIZED & PDF-ALIGNED)
 # ==============================================================================
 with tab_tca:
     st.markdown("### 📐 Triple Collocation Analysis (TCA) Weight Allocation")
-    st.write("This module evaluates the inverse-variance weights assigned to each satellite product by the TCA framework.")
+    st.write("This module evaluates the inverse-variance weights assigned to each satellite product. Higher weights indicate lower random error variance (higher reliability) in that specific regime.")
     
-    strat_level = st.radio("Select Stratification Level to Analyze:", options=["Global", "Seasonal", "Elevation", "Hierarchical"], horizontal=True)
+    # Reference the PDF's core concept
+    st.info("📖 **Scientific Context:** Following TCA methodology (McColl et al., 2014), weights are derived from mutual log-space covariance. As noted in the presentation guide, these weights are *regime-dependent*—shifting significantly across monsoon seasons and elevation quartiles.")
+
+    # 1. Stratification Selector
+    strat_level = st.radio("Select Stratification Level to Analyze:", 
+                           options=["Global", "Seasonal", "Elevation", "Hierarchical"], 
+                           horizontal=True)
     
-    @st.cache_data(ttl=3600)
+    @st.cache_data
     def compute_all_tca_weights(file_path):
         df_temp = pd.read_parquet(file_path)
-        valid = df_temp[(df_temp['precip_chirps'] > 0) & (df_temp['precip_era5_land'] > 0) & (df_temp['precip_persiann'] > 0)].copy()
+        valid = df_temp[(df_temp['precip_chirps'] > 0) & 
+                        (df_temp['precip_era5_land'] > 0) & 
+                        (df_temp['precip_persiann'] > 0)].copy()
+        
         def get_w(data, target_col):
             if len(data) < 5: return [np.nan, np.nan, np.nan]
             try:
@@ -622,12 +631,22 @@ with tab_tca:
         
         w_g = get_w(valid, 'P_merged_global')
         df_g = pd.DataFrame([{"Stratum": "Global", "CHIRPS": w_g[0], "ERA5-Land": w_g[1], "PERSIANN-CDR": w_g[2]}])
-        records_s = [{"Stratum": s, "CHIRPS": w[0], "ERA5-Land": w[1], "PERSIANN-CDR": w[2]} for s in sorted(valid['season'].dropna().unique()) for w in [get_w(valid[valid['season'] == s], 'P_merged_season')]]
+        
+        records_s = [{"Stratum": s, "CHIRPS": w[0], "ERA5-Land": w[1], "PERSIANN-CDR": w[2]} 
+                     for s in sorted(valid['season'].dropna().unique()) 
+                     for w in [get_w(valid[valid['season'] == s], 'P_merged_season')]]
         df_s = pd.DataFrame(records_s)
-        records_e = [{"Stratum": e, "CHIRPS": w[0], "ERA5-Land": w[1], "PERSIANN-CDR": w[2]} for e in sorted(valid['elev_bin'].dropna().unique(), reverse=True) for w in [get_w(valid[valid['elev_bin'] == e], 'P_merged_elev')]]
+        
+        records_e = [{"Stratum": e, "CHIRPS": w[0], "ERA5-Land": w[1], "PERSIANN-CDR": w[2]} 
+                     for e in sorted(valid['elev_bin'].dropna().unique(), reverse=True) 
+                     for w in [get_w(valid[valid['elev_bin'] == e], 'P_merged_elev')]]
         df_e = pd.DataFrame(records_e)
-        records_h = [{"Stratum": h, "CHIRPS": w[0], "ERA5-Land": w[1], "PERSIANN-CDR": w[2]} for h in sorted(valid['stratum_hier'].dropna().unique()) for w in [get_w(valid[valid['stratum_hier'] == h], 'P_merged_hier')]]
+        
+        records_h = [{"Stratum": h, "CHIRPS": w[0], "ERA5-Land": w[1], "PERSIANN-CDR": w[2]} 
+                     for h in sorted(valid['stratum_hier'].dropna().unique()) 
+                     for w in [get_w(valid[valid['stratum_hier'] == h], 'P_merged_hier')]]
         df_h = pd.DataFrame(records_h)
+        
         return df_g, df_s, df_e, df_h
 
     file_path = str(project_root / "outputs" / "processed" / "sarawak_TCA_fused.parquet")
@@ -641,24 +660,113 @@ with tab_tca:
     if weights_df.empty or weights_df['CHIRPS'].isna().all():
         st.warning("⚠️ No valid TCA weights could be calculated for this stratum.")
     else:
-        col_w1, col_w2 = st.columns([1.2, 1])
-        with col_w1:
-            st.markdown(f"#### 🌡️ {strat_level} Weight Allocation Heatmap")
-            fig_heat = go.Figure(data=go.Heatmap(z=weights_df[['CHIRPS', 'ERA5-Land', 'PERSIANN-CDR']].values, x=['CHIRPS', 'ERA5-Land', 'PERSIANN-CDR'], y=weights_df['Stratum'], colorscale='Viridis', text=np.round(weights_df[['CHIRPS', 'ERA5-Land', 'PERSIANN-CDR']].values, 3), texttemplate="%{text}", hoverongaps=False))
-            fig_heat.update_layout(height=450, margin={"r":20,"t":20,"l":20,"b":20}, yaxis=dict(autorange="reversed"))
-            st.plotly_chart(fig_heat, use_container_width=True)
+        # --- VISUAL 1: THE TERNARY SIMPLEX (PDF Figure 7) ---
+        st.markdown("#### 🔺 1. Ternary Merging Weight Simplex")
+        st.caption("Maps optimal TCA inverse-variance weights ($w_i \propto 1/\sigma_{\epsilon,i}^2$). Points closer to a vertex indicate that product dominates the fusion in that regime.")
+        
+        fig_tern = px.scatter_ternary(
+            weights_df, 
+            a="PERSIANN-CDR", b="CHIRPS", c="ERA5-Land", 
+            hover_name="Stratum", 
+            color="Stratum" if strat_level != "Global" else None, 
+            color_discrete_sequence=px.colors.qualitative.Bold if strat_level == "Global" else None,
+            size_max=15,
+            opacity=0.8
+        )
+        fig_tern.update_traces(marker=dict(size=12, line=dict(width=1, color='DarkSlateGrey')))
+        fig_tern.update_layout(
+            height=500, margin={"r":20,"t":40,"l":20,"b":20},
+            ternary=dict(
+                sum=1, 
+                aaxis=dict(title="PERSIANN-CDR Weight", tickformat=".2f", tickfont=dict(size=10)),
+                baxis=dict(title="CHIRPS Weight", tickformat=".2f", tickfont=dict(size=10)),
+                caxis=dict(title="ERA5-Land Weight", tickformat=".2f", tickfont=dict(size=10))
+            )
+        )
+        st.plotly_chart(fig_tern, use_container_width=True)
+
+        st.markdown("---")
+
+        # --- VISUAL 2: REGIME-DEPENDENT HEATMAPS (PDF Figure 1/2 Adaptation) ---
+        st.markdown("#### 🌡️ 2. Regime-Dependent Reliability Heatmaps")
+        st.caption("Visualizes how satellite reliability shifts across Monsoon Seasons (Left) and Elevation Quartiles (Right). Yellow = High Weight (Low Error).")
+        
+        col_h1, col_h2 = st.columns(2)
+        
+        with col_h1:
+            st.markdown("**Seasonal Weights**")
+            # Ensure correct order for seasons
+            season_order = ['NEM', 'Inter', 'SWM']
+            df_s_sorted = df_s[df_s['Stratum'].isin(season_order)].copy()
+            df_s_sorted['Stratum'] = pd.Categorical(df_s_sorted['Stratum'], categories=season_order, ordered=True)
+            df_s_sorted = df_s_sorted.sort_values('Stratum')
             
-            st.markdown(f"#### 📊 {strat_level} Weight Allocation (Bar Chart)")
-            df_bar = weights_df.melt(id_vars='Stratum', var_name='Product', value_name='Weight')
-            fig_bar = px.bar(df_bar, x='Stratum', y='Weight', color='Product', barmode='group', height=300)
+            if not df_s_sorted.empty:
+                heat_data_s = df_s_sorted[['CHIRPS', 'ERA5-Land', 'PERSIANN-CDR']].values
+                fig_heat_s = go.Figure(data=go.Heatmap(
+                    z=heat_data_s,
+                    x=['CHIRPS', 'ERA5-Land', 'PERSIANN-CDR'],
+                    y=df_s_sorted['Stratum'],
+                    colorscale='YlOrRd', # Yellow to Red is better for "Heat/Reliability"
+                    text=np.round(heat_data_s, 3),
+                    texttemplate="%{text}",
+                    hoverongaps=False,
+                    colorbar=dict(title="Weight")
+                ))
+                fig_heat_s.update_layout(height=300, margin={"r":20,"t":20,"l":20,"b":20}, yaxis=dict(autorange="reversed"))
+                st.plotly_chart(fig_heat_s, use_container_width=True)
+
+        with col_h2:
+            st.markdown("**Elevation Weights (Q1=Low, Q4=High)**")
+            if not df_e.empty:
+                heat_data_e = df_e[['CHIRPS', 'ERA5-Land', 'PERSIANN-CDR']].values
+                fig_heat_e = go.Figure(data=go.Heatmap(
+                    z=heat_data_e,
+                    x=['CHIRPS', 'ERA5-Land', 'PERSIANN-CDR'],
+                    y=df_e['Stratum'],
+                    colorscale='YlOrRd',
+                    text=np.round(heat_data_e, 3),
+                    texttemplate="%{text}",
+                    hoverongaps=False,
+                    colorbar=dict(title="Weight")
+                ))
+                fig_heat_e.update_layout(height=300, margin={"r":20,"t":20,"l":20,"b":20}, yaxis=dict(autorange="reversed"))
+                st.plotly_chart(fig_heat_e, use_container_width=True)
+
+        st.markdown("---")
+
+        # --- VISUAL 3: RELIABILITY SHIFT BAR CHART (PDF Figure 2 Concept) ---
+        st.markdown("#### 📊 3. Reliability Shift Across Elevation Quartiles")
+        st.caption("Grouped bar chart showing the evolution of satellite weights from Lowland (Q1) to Highland (Q4) regimes. Highlights the impact of orographic lifting on satellite performance.")
+        
+        if not df_e.empty:
+            df_e_melt = df_e.melt(id_vars='Stratum', var_name='Product', value_name='Weight')
+            
+            fig_bar = px.bar(
+                df_e_melt, 
+                x='Stratum', 
+                y='Weight', 
+                color='Product',
+                barmode='group',
+                text='Weight',
+                color_discrete_map={
+                    'CHIRPS': '#1f77b4', 
+                    'ERA5-Land': '#ff7f0e', 
+                    'PERSIANN-CDR': '#2ca02c'
+                },
+                height=400
+            )
+            fig_bar.update_traces(texttemplate='%{text:.2f}', textposition='outside')
+            fig_bar.update_layout(
+                xaxis_title="Elevation Quartile (Q1=Lowest, Q4=Highest)",
+                yaxis_title="TCA Weight (Reliability)",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            )
             st.plotly_chart(fig_bar, use_container_width=True)
 
-        with col_w2:
-            st.markdown("#### 🔺 Ternary Simplex Clustering")
-            fig_tern = px.scatter_ternary(weights_df, a="PERSIANN-CDR", b="CHIRPS", c="ERA5-Land", hover_name="Stratum", color="Stratum" if strat_level != "Global" else None, size_max=15)
-            fig_tern.update_traces(marker=dict(size=12, line=dict(width=1, color='DarkSlateGrey')))
-            fig_tern.update_layout(height=450, margin={"r":20,"t":40,"l":20,"b":20})
-            st.plotly_chart(fig_tern, use_container_width=True)
+        # --- RAW DATA EXPANDER ---
+        with st.expander("🔍 View Raw TCA Weight Data"):
+            st.dataframe(weights_df.style.format({"CHIRPS": "{:.3f}", "ERA5-Land": "{:.3f}", "PERSIANN-CDR": "{:.3f}"}), use_container_width=True)
 
 
 # ==============================================================================
