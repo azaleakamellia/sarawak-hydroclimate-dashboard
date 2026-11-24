@@ -97,19 +97,20 @@ if 'Gauge_Observed' in df.columns:
     PRECIP_SOURCES['Gauge_Observed'] = 'In-Situ Gauge (Truth)'
 
 # ==============================================================================
-# THE STATION-LEVEL TCA CALCULATOR
+# THE STATION-LEVEL & SEASONAL TCA CALCULATOR
 # ==============================================================================
 import warnings
 warnings.filterwarnings('ignore')
 
 @st.cache_data(ttl=3600)
-def calculate_station_tca_metrics(df):
-    """Calculates TCA error std dev, Correlation (R), and SNR for each station."""
+def calculate_tca_metrics_with_seasons(df):
+    """Calculates TCA metrics per station AND per season for granular diagnostics."""
     results = []
     df_wet = df[(df['precip_chirps'] > 0) & (df['precip_era5_land'] > 0) & (df['precip_persiann'] > 0)].copy()
     
-    for stn_id, group in df_wet.groupby('station_id'):
-        if len(group) < 50: continue
+    # Group by station AND season
+    for (stn_id, season), group in df_wet.groupby(['station_id', 'season']):
+        if len(group) < 30: continue # 30 months = 10 years of data for one season (minimum for stability)
         
         x = np.log(group['precip_chirps'].values)
         y = np.log(group['precip_persiann'].values)
@@ -120,7 +121,6 @@ def calculate_station_tca_metrics(df):
         cov_yz = np.cov(y, z, ddof=1)[0, 1]
         
         var_x, var_y, var_z = np.var(x, ddof=1), np.var(y, ddof=1), np.var(z, ddof=1)
-        
         eps = 1e-9
         
         se_x = max(var_x - (cov_xy * cov_xz) / max(cov_yz, eps), eps)
@@ -140,14 +140,13 @@ def calculate_station_tca_metrics(df):
         snr_z = 10 * np.log10(sig_z / se_z) if sig_z > 0 else np.nan
         
         meta = group.iloc[0]
-        
         elev = meta['elev_m']
         if elev < 100: zone = 'Coastal'
         elif elev < 500: zone = 'Inland'
         else: zone = 'Highland'
         
         results.append({
-            'station_id': stn_id, 'lon': meta['lon'], 'lat': meta['lat'], 
+            'station_id': stn_id, 'season': season, 'lon': meta['lon'], 'lat': meta['lat'], 
             'elev_m': elev, 'zone': zone,
             'chirps_se': np.sqrt(se_x), 'persiann_se': np.sqrt(se_y), 'era5_se': np.sqrt(se_z),
             'chirps_R': r_x, 'persiann_R': r_y, 'era5_R': r_z,
@@ -339,7 +338,7 @@ with tab_data:
                 fig.add_trace(go.Scatter(
                     x=x, y=d['y'], mode='lines', name=source,
                     line=dict(color=hexc, width=2.5),
-                    fill='tozeroy', fillcolor=get_rgba(hexc, 0.15),  # ===== FIX #2: was rgba() =====
+                    fill='tozeroy', fillcolor=get_rgba(hexc, 0.15),
                     hovertemplate=f"<b>{source}</b><br>Precip: %{{x:.1f}} mm<br>Density: %{{y:.4f}}<extra></extra>"
                 ))
                 fig.add_trace(go.Scatter(
@@ -635,70 +634,11 @@ with tab_explore:
                     st.plotly_chart(fig, use_container_width=True)
 
 # ==============================================================================
-# THE STATION-LEVEL & SEASONAL TCA CALCULATOR
-# ==============================================================================
-import warnings
-warnings.filterwarnings('ignore')
-
-@st.cache_data(ttl=3600)
-def calculate_tca_metrics_with_seasons(df):
-    """Calculates TCA metrics per station AND per season for granular diagnostics."""
-    results = []
-    df_wet = df[(df['precip_chirps'] > 0) & (df['precip_era5_land'] > 0) & (df['precip_persiann'] > 0)].copy()
-    
-    # Group by station AND season
-    for (stn_id, season), group in df_wet.groupby(['station_id', 'season']):
-        if len(group) < 30: continue # 30 months = 10 years of data for one season (minimum for stability)
-        
-        x = np.log(group['precip_chirps'].values)
-        y = np.log(group['precip_persiann'].values)
-        z = np.log(group['precip_era5_land'].values)
-        
-        cov_xy = np.cov(x, y, ddof=1)[0, 1]
-        cov_xz = np.cov(x, z, ddof=1)[0, 1]
-        cov_yz = np.cov(y, z, ddof=1)[0, 1]
-        
-        var_x, var_y, var_z = np.var(x, ddof=1), np.var(y, ddof=1), np.var(z, ddof=1)
-        eps = 1e-9
-        
-        se_x = max(var_x - (cov_xy * cov_xz) / max(cov_yz, eps), eps)
-        se_y = max(var_y - (cov_xy * cov_yz) / max(cov_xz, eps), eps)
-        se_z = max(var_z - (cov_xz * cov_yz) / max(cov_xy, eps), eps)
-        
-        sig_x = (cov_xy * cov_xz) / max(cov_yz, eps)
-        sig_y = (cov_xy * cov_yz) / max(cov_xz, eps)
-        sig_z = (cov_xz * cov_yz) / max(cov_xy, eps)
-        
-        r_x = np.sqrt(sig_x / (sig_x + se_x))
-        r_y = np.sqrt(sig_y / (sig_y + se_y))
-        r_z = np.sqrt(sig_z / (sig_z + se_z))
-        
-        snr_x = 10 * np.log10(sig_x / se_x) if sig_x > 0 else np.nan
-        snr_y = 10 * np.log10(sig_y / se_y) if sig_y > 0 else np.nan
-        snr_z = 10 * np.log10(sig_z / se_z) if sig_z > 0 else np.nan
-        
-        meta = group.iloc[0]
-        elev = meta['elev_m']
-        if elev < 100: zone = 'Coastal'
-        elif elev < 500: zone = 'Inland'
-        else: zone = 'Highland'
-        
-        results.append({
-            'station_id': stn_id, 'season': season, 'lon': meta['lon'], 'lat': meta['lat'], 
-            'elev_m': elev, 'zone': zone,
-            'chirps_se': np.sqrt(se_x), 'persiann_se': np.sqrt(se_y), 'era5_se': np.sqrt(se_z),
-            'chirps_R': r_x, 'persiann_R': r_y, 'era5_R': r_z,
-            'chirps_snr': snr_x, 'persiann_snr': snr_y, 'era5_snr': snr_z
-        })
-        
-    return pd.DataFrame(results)
-
-# ==============================================================================
 # TAB 3: TCA WEIGHT & ERROR ANALYSIS (UPGRADED WITH SEASONAL STRATIFICATION)
 # ==============================================================================
 with tab_tca:
     st.markdown("### 📐 Triple Collocation Analysis (TCA) Diagnostics")
-    st.write("Evaluating the random error variance ($\sigma_\epsilon$) and data-truth correlation ($R$) of satellite products without assuming a ground truth.")
+    st.write("Evaluating the random error variance (σₑ) and data-truth correlation (R) of satellite products without assuming a ground truth.")
     
     with st.spinner("Calculating station-level & seasonal TCA metrics..."):
         tca_metrics_df = calculate_tca_metrics_with_seasons(df)
@@ -712,7 +652,7 @@ with tab_tca:
     # ==========================================================================
     # VISUAL 1: Multi-Panel Spatial Error Map (Overall Aggregation)
     # ==========================================================================
-    st.markdown("#### 🗺️ 1. Spatial Distribution of TCA Error Standard Deviation ($\sigma_\epsilon$)")
+    st.markdown("#### 🗺️ 1. Spatial Distribution of TCA Error Standard Deviation (σₑ)")
     st.caption("Maps the overall random error (mm/month) across Sarawak. Higher values indicate greater uncertainty, often amplified by topographic complexity or coastal convection.")
     
     metric_to_map = st.radio("Select Product to Map:", ['CHIRPS', 'PERSIANN-CDR', 'ERA5-Land'], horizontal=True, index=0)
@@ -750,7 +690,7 @@ with tab_tca:
     # ==========================================================================
     st.markdown("#### 📦 2. Sub-Regional Error & Correlation Distributions")
     
-    plot_metric = st.radio("Select Metric to Analyze:", ['Error Std Dev ($\sigma_\epsilon$)', 'Data-Truth Correlation ($R$)', 'Signal-to-Noise Ratio (SNR)'], horizontal=True, index=1)
+    plot_metric = st.radio("Select Metric to Analyze:", ['Error Std Dev (σₑ)', 'Data-Truth Correlation (R)', 'Signal-to-Noise Ratio (SNR)'], horizontal=True, index=1)
     
     if 'Error' in plot_metric:
         value_cols = ['chirps_se', 'persiann_se', 'era5_se']
@@ -787,9 +727,9 @@ with tab_tca:
     with st.expander("📚 Scientific Caveats: Monsoon Dynamics & Climate Change Shifts"):
         st.markdown("""
         Interpreting seasonal TCA metrics requires acknowledging the non-stationary physical drivers of Sarawak's precipitation:
-        1. **NEM Onset Delay**: The Northeast Monsoon (NEM) onset has shown a statistically significant delay of 1–2 weeks in recent decades, compressing peak rainfall into shorter, more intense bursts *(Liew et al., 2021; Tangang et al., 2017)*. This temporal shift can inflate random error ($\sigma_\epsilon$) estimates if satellite retrieval algorithms are not dynamically calibrated to the shifting calendar.
+        1. **NEM Onset Delay**: The Northeast Monsoon (NEM) onset has shown a statistically significant delay of 1–2 weeks in recent decades, compressing peak rainfall into shorter, more intense bursts *(Liew et al., 2021; Tangang et al., 2017)*. This temporal shift can inflate random error (σₑ) estimates if satellite retrieval algorithms are not dynamically calibrated to the shifting calendar.
         2. **Inter-Monsoon Convective Instability**: During the Inter-Monsoon periods (April-May, Oct-Nov), rising sea surface temperatures in the South China Sea drive high convective instability. Satellite products relying on IR cloud-top temperatures (e.g., PERSIANN-CDR) frequently misinterpret warm, non-precipitating anvil clouds as rain, leading to higher error variance compared to gauge-blended products like CHIRPS.
-        3. **SWM Sumatra Squalls**: During the Southwest Monsoon (SWM), morning convective "Sumatra Squalls" drive highly localized coastal precipitation. Reanalysis models like ERA5-Land often smooth these sub-grid events, resulting in elevated $\sigma_\epsilon$ in coastal zones during this specific season.
+        3. **SWM Sumatra Squalls**: During the Southwest Monsoon (SWM), morning convective "Sumatra Squalls" drive highly localized coastal precipitation. Reanalysis models like ERA5-Land often smooth these sub-grid events, resulting in elevated σₑ in coastal zones during this specific season.
         
         *References:*
         - Liew, J. X., et al. (2021). Spatio-temporal characteristics of extreme precipitation over Sarawak, Malaysia. *International Journal of Climatology*, 41(S1), E1234-E1250.
@@ -801,7 +741,7 @@ with tab_tca:
     # VISUAL 3: Ternary Simplex (With Seasonal Toggle)
     # ==========================================================================
     st.markdown("#### 🔺 3. Barycentric Merging Weight Simplex")
-    st.caption("Optimal inverse-variance weights ($w_i \propto 1/\sigma_{\epsilon,i}^2$) for data fusion. Points closer to a corner indicate that product dominates the fusion.")
+    st.caption("Optimal inverse-variance weights (wᵢ ∝ 1/σ²ᵢ) for data fusion. Points closer to a corner indicate that product dominates the fusion.")
     
     # Calculate weights
     tca_metrics_df['inv_c'] = 1 / (tca_metrics_df['chirps_se']**2)
@@ -837,6 +777,7 @@ with tab_tca:
         opacity=0.6
     )
     
+    # ✅ FIX: Added the missing closing parenthesis ')' for update_layout
     fig_tern.update_layout(
         height=500,
         ternary=dict(
@@ -845,6 +786,7 @@ with tab_tca:
             baxis=dict(title="CHIRPS Weight", tickformat=".2f"),
             caxis=dict(title="ERA5-Land Weight", tickformat=".2f")
         )
+    )
     st.plotly_chart(fig_tern, use_container_width=True)
     
 # ==============================================================================
