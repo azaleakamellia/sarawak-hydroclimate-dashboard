@@ -134,14 +134,18 @@ with tab_data:
 
     st.markdown("---")
 
-    # 2. Distribution Comparison (Custom KDE with Mean/Sigma Annotations)
-    st.markdown("#### 📈 Probability Density Function (PDF) Comparison")
-    st.caption("Kernel Density Estimation (KDE) showing the continuous probability distribution of monthly precipitation. Vertical dashed lines indicate the central mean (μ), with annotations for ±1 standard deviation (σ).")
-    
+    # 2. Distribution Comparison (Overlaid KDE <-> Ridge Plot toggle)
+    st.markdown("#### 📈 Precipitation Distribution Comparison")
+    st.caption("Toggle between an overlaid KDE (absolute density + mean/σ) and a Ridge plot (shape/skew/tail comparison without occlusion).")
+
     plot_cols = ['Gauge_Observed', 'precip_chirps', 'precip_era5_land', 'precip_persiann']
     available_plot_cols = [col for col in plot_cols if col in df.columns]
-    
+
     if available_plot_cols:
+        import numpy as np
+        from scipy import stats
+        import plotly.graph_objects as go
+
         df_melted = df[available_plot_cols].melt(var_name='Data Source', value_name='Precipitation (mm)')
         df_melted['Data Source'] = df_melted['Data Source'].map({
             'Gauge_Observed': 'In-Situ Gauge (Truth)',
@@ -149,115 +153,132 @@ with tab_data:
             'precip_era5_land': 'Raw ERA5-Land',
             'precip_persiann': 'Raw PERSIANN-CDR'
         }).fillna('Unknown')
-        
-        selected_sources = st.multiselect(
-            "Select Data Sources to Overlay:",
-            options=['In-Situ Gauge (Truth)', 'Raw CHIRPS', 'Raw ERA5-Land', 'Raw PERSIANN-CDR'],
-            default=['In-Situ Gauge (Truth)', 'Raw CHIRPS', 'Raw ERA5-Land', 'Raw PERSIANN-CDR']
-        )
-        
-        if selected_sources:
-            import numpy as np
-            from scipy import stats
-            import plotly.graph_objects as go
-            from plotly.subplots import make_subplots
-            
-            # We use a vertical stack (N rows, 1 column) for perfect X-axis alignment
-            num_sources = len(selected_sources)
-            row_heights = [0.25] * num_sources # Equal height for each row
-            
-            fig_kde = make_subplots(
-                rows=num_sources, cols=1,
-                shared_xaxes=True,
-                shared_yaxes=True,
-                vertical_spacing=0.05,
-                row_heights=row_heights
-            )
-            
-            color_map = {
-                'In-Situ Gauge (Truth)': '#d62728',
-                'Raw CHIRPS': '#1f77b4',
-                'Raw ERA5-Land': '#ff7f0e',
-                'Raw PERSIANN-CDR': '#2ca02c'
-            }
-            
-            # Determine global X and Y ranges for consistent scaling across all facets
-            all_x = []
-            all_y = []
-            kde_data = {}
-            
-            for source in selected_sources:
-                source_data = df_melted[df_melted['Data Source'] == source]['Precipitation (mm)'].dropna()
-                if len(source_data) < 2: continue
-                
-                # Subsample for speed
-                if len(source_data) > 10000:
-                    source_data = source_data.sample(10000, random_state=42)
-                
-                kde = stats.gaussian_kde(source_data)
-                x_min = source_data.quantile(0.01)
-                x_max = source_data.quantile(0.99)
-                x = np.linspace(x_min, x_max, 500)
-                y = kde(x)
-                
-                kde_data[source] = {'x': x, 'y': y, 'mean': float(np.mean(source_data)), 'std': float(np.std(source_data))}
-                all_x.extend(x)
-                all_y.extend(y)
-            
-            global_x_min, global_x_max = min(all_x), max(all_x)
-            global_y_max = max(all_y) * 1.2 # 20% headroom for annotations
-            
-            # Now plot each source in its own row
-            for row_idx, source in enumerate(selected_sources, start=1):
-                if source not in kde_data: continue
-                
-                data = kde_data[source]
-                color_hex = color_map.get(source, '#636efa')
-                color_rgba = color_hex.replace(')', ', 0.15)').replace('rgb', 'rgba') # Quick hack for rgba
-                
-                # 1. Add KDE filled area to specific row
-                fig_kde.add_trace(go.Scatter(
-                    x=data['x'], y=data['y'], mode='lines', name=source,
-                    line=dict(color=color_hex, width=2.5),
-                    fill='tozeroy', fillcolor=color_rgba,
-                    hovertemplate=f"<b>{source}</b><br>Precip: %{{x:.1f}} mm<br>Density: %{{y:.4f}}<extra></extra>"
-                ), row=row_idx, col=1)
-                
-                # 2. Add Mean (μ) vertical line
-                fig_kde.add_trace(go.Scatter(
-                    x=[data['mean'], data['mean']], y=[0, global_y_max], mode='lines',
-                    line=dict(color=color_hex, dash='dash', width=2),
-                    name=f"{source} Mean (μ)", showlegend=False
-                ), row=row_idx, col=1)
-                
-                # 3. Add Mean + Sigma annotation inside the subplot
-                fig_kde.add_annotation(
-                    x=data['mean'], y=global_y_max * 0.85, # Positioned near the top of each subplot
-                    text=f"μ={data['mean']:.1f}<br>σ={data['std']:.1f}",
-                    showarrow=False,
-                    font=dict(color=color_hex, size=11, family="Arial Black"),
-                    align="center",
-                    bgcolor="white", bordercolor=color_hex, borderwidth=1, borderpad=4,
-                    row=row_idx, col=1
-                )
-                
-                # Add source name as a subplot title (y-axis label alternative)
-                fig_kde.update_yaxes(title_text=source, row=row_idx, col=1, title_standoff=10)
 
-            # Final Layout Tweaks
-            fig_kde.update_layout(
-                height=max(400, num_sources * 200), # Dynamically scale height
-                hovermode="x unified",
-                showlegend=False, # Legend is redundant since Y-axis labels are the names
-                xaxis_title="Monthly Precipitation (mm)",
-                xaxis=dict(range=[global_x_min, global_x_max])
+        # Preferred order: Truth at the base, SPEs stacked above it
+        ORDER = ['In-Situ Gauge (Truth)', 'Raw CHIRPS', 'Raw ERA5-Land', 'Raw PERSIANN-CDR']
+        selected_sources = st.multiselect(
+            "Select Data Sources to Compare:",
+            options=ORDER,
+            default=ORDER
+        )
+        sel = [s for s in ORDER if s in selected_sources]
+
+        viz_mode = st.radio(
+            "Visualization Mode",
+            ["Ridge Plot (shape)", "Overlaid KDE (density)"],
+            horizontal=True,
+            index=0  # set to 1 to default to overlaid KDE
+        )
+
+        # Shared, honest x-range across all selected sources (trim the extreme tail)
+        all_vals = df_melted[df_melted['Data Source'].isin(sel)]['Precipitation (mm)'].dropna()
+        x_max = float(all_vals.quantile(0.99))
+        x = np.linspace(0, x_max, 200)
+
+        # Pre-compute normalized KDE + stats per source (subsampled for speed)
+        kde_store = {}
+        for source in sel:
+            v = df_melted[df_melted['Data Source'] == source]['Precipitation (mm)'].dropna()
+            if len(v) < 2:
+                continue
+            if len(v) > 10000:
+                v = v.sample(10000, random_state=42)
+            dens = stats.gaussian_kde(v)(x)
+            dens = dens / dens.max()  # normalize each ridge to unit peak
+            kde_store[source] = {
+                'y': dens,
+                'mean': float(np.mean(v)),
+                'std': float(np.std(v))
+            }
+
+        color_hex = {
+            'In-Situ Gauge (Truth)': '#d62728',
+            'Raw CHIRPS': '#1f77b4',
+            'Raw ERA5-Land': '#ff7f0e',
+            'Raw PERSIANN-CDR': '#2ca02c'
+        }
+        def rgba(h, a):
+            n = int(h[1:], 16)
+            return f"rgba({(n>>16)&255},{(n>>8)&255},{n&255},{a})"
+
+        if viz_mode.startswith("Ridge"):
+            overlap = 0.45  # vertical spacing between ridge baselines (tune 0.35-0.6)
+            fig = go.Figure()
+            tickvals, ticktext = [], []
+            for i, source in enumerate(kde_store):
+                d = kde_store[source]
+                off = i * overlap
+                tickvals.append(off)
+                ticktext.append(source)
+                hexc = color_hex[source]
+
+                # baseline (thin separator, like the reference image)
+                fig.add_trace(go.Scatter(
+                    x=x, y=[off]*len(x), mode='lines',
+                    line=dict(width=0.5, color='rgba(0,0,0,0.15)'),
+                    hoverinfo='skip', showlegend=False
+                ))
+                # filled ridge (tonexty -> fills down to its own baseline)
+                fig.add_trace(go.Scatter(
+                    x=x, y=off + d['y'], mode='lines', name=source,
+                    line=dict(color=hexc, width=1.5),
+                    fill='tonexty', fillcolor=rgba(hexc, 0.8),
+                    hovertemplate=f"<b>{source}</b><br>Precip: %{{x:.1f}} mm<br><extra></extra>"
+                ))
+                # dashed mean line + compact μ/σ label
+                fig.add_trace(go.Scatter(
+                    x=[d['mean'], d['mean']], y=[off - 0.03, off + 1.05], mode='lines',
+                    line=dict(color='black', dash='dash', width=1.2),
+                    hoverinfo='skip', showlegend=False
+                ))
+                fig.add_annotation(
+                    x=d['mean'], y=off + 1.05,
+                    text=f"μ={d['mean']:.0f} σ={d['std']:.0f}",
+                    showarrow=False, font=dict(size=9, color=hexc),
+                    yanchor='bottom'
+                )
+
+            fig.update_layout(
+                height=max(420, len(kde_store) * 110),
+                xaxis=dict(title="Monthly Precipitation (mm)", range=[0, x_max]),
+                yaxis=dict(tickvals=tickvals, ticktext=ticktext,
+                           range=[-0.1, (len(kde_store)-1)*overlap + 1.15],
+                           showgrid=False, zeroline=False),
+                hovermode='closest', showlegend=False,
+                plot_bgcolor='white'
             )
-            
-            # Remove inner Y-axis ticks/labels for a cleaner look, keep only the title
-            for i in range(1, num_sources + 1):
-                fig_kde.update_yaxes(showticklabels=False, row=i, col=1)
-            
-            st.plotly_chart(fig_kde, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True)
+
+        else:  # Overlaid KDE
+            fig = go.Figure()
+            for source in kde_store:
+                d = kde_store[source]
+                hexc = color_hex[source]
+                fig.add_trace(go.Scatter(
+                    x=x, y=d['y'], mode='lines', name=source,
+                    line=dict(color=hexc, width=2.5),
+                    fill='tozeroy', fillcolor=rgba(hexc, 0.15),
+                    hovertemplate=f"<b>{source}</b><br>Precip: %{{x:.1f}} mm<br>Density: %{{y:.4f}}<extra></extra>"
+                ))
+                fig.add_trace(go.Scatter(
+                    x=[d['mean'], d['mean']], y=[0, max(d['y'])*1.1], mode='lines',
+                    line=dict(color=hexc, dash='dash', width=2),
+                    hoverinfo='skip', showlegend=False
+                ))
+                fig.add_annotation(
+                    x=d['mean'], y=max(d['y'])*1.15,
+                    text=f"μ={d['mean']:.1f}<br>σ={d['std']:.1f}",
+                    showarrow=False, font=dict(color=hexc, size=11),
+                    bgcolor='white', bordercolor=hexc, borderwidth=1, borderpad=3
+                )
+            fig.update_layout(
+                height=450,
+                xaxis=dict(title="Monthly Precipitation (mm)", range=[0, x_max]),
+                yaxis=dict(title="Probability Density"),
+                hovermode='x unified',
+                legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
+            )
+            st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("---")
 
