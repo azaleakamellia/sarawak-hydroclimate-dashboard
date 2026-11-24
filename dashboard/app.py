@@ -106,51 +106,41 @@ warnings.filterwarnings('ignore')
 def calculate_station_tca_metrics(df):
     """Calculates TCA error std dev, Correlation (R), and SNR for each station."""
     results = []
-    # Filter for wet days only (required for log-space TCA)
     df_wet = df[(df['precip_chirps'] > 0) & (df['precip_era5_land'] > 0) & (df['precip_persiann'] > 0)].copy()
     
     for stn_id, group in df_wet.groupby('station_id'):
-        if len(group) < 50: continue # Need minimum samples for stability
+        if len(group) < 50: continue
         
-        # Log transform
         x = np.log(group['precip_chirps'].values)
         y = np.log(group['precip_persiann'].values)
         z = np.log(group['precip_era5_land'].values)
         
-        # Covariances
         cov_xy = np.cov(x, y, ddof=1)[0, 1]
         cov_xz = np.cov(x, z, ddof=1)[0, 1]
         cov_yz = np.cov(y, z, ddof=1)[0, 1]
         
-        # Variances
         var_x, var_y, var_z = np.var(x, ddof=1), np.var(y, ddof=1), np.var(z, ddof=1)
         
         eps = 1e-9
         
-        # Error Variances (McColl et al., 2014)
         se_x = max(var_x - (cov_xy * cov_xz) / max(cov_yz, eps), eps)
         se_y = max(var_y - (cov_xy * cov_yz) / max(cov_xz, eps), eps)
         se_z = max(var_z - (cov_xz * cov_yz) / max(cov_xy, eps), eps)
         
-        # Signal Variances (True signal variance estimated from each product)
         sig_x = (cov_xy * cov_xz) / max(cov_yz, eps)
         sig_y = (cov_xy * cov_yz) / max(cov_xz, eps)
         sig_z = (cov_xz * cov_yz) / max(cov_xy, eps)
         
-        # Data-Truth Correlation (R)
         r_x = np.sqrt(sig_x / (sig_x + se_x))
         r_y = np.sqrt(sig_y / (sig_y + se_y))
         r_z = np.sqrt(sig_z / (sig_z + se_z))
         
-        # SNR (dB)
-        snr_x = 10 * np.log10(sig_x / se_x)
-        snr_y = 10 * np.log10(sig_y / se_y)
-        snr_z = 10 * np.log10(sig_z / se_z)
+        snr_x = 10 * np.log10(sig_x / se_x) if sig_x > 0 else np.nan
+        snr_y = 10 * np.log10(sig_y / se_y) if sig_y > 0 else np.nan
+        snr_z = 10 * np.log10(sig_z / se_z) if sig_z > 0 else np.nan
         
-        # Get metadata
         meta = group.iloc[0]
         
-        # Classify Zone based on Elevation (Sarawak context)
         elev = meta['elev_m']
         if elev < 100: zone = 'Coastal'
         elif elev < 500: zone = 'Inland'
@@ -224,7 +214,6 @@ with tab_data:
             'precip_persiann': 'Raw PERSIANN-CDR'
         }).fillna('Unknown')
 
-        # Preferred order: Truth at the base, SPEs stacked above it
         ORDER = ['In-Situ Gauge (Truth)', 'Raw CHIRPS', 'Raw ERA5-Land', 'Raw PERSIANN-CDR']
         selected_sources = st.multiselect(
             "Select Data Sources to Compare:",
@@ -237,15 +226,13 @@ with tab_data:
             "Visualization Mode",
             ["Ridge Plot (shape)", "Overlaid KDE (density)"],
             horizontal=True,
-            index=0  # set to 1 to default to overlaid KDE
+            index=0
         )
 
-        # Shared, honest x-range across all selected sources (trim the extreme tail)
         all_vals = df_melted[df_melted['Data Source'].isin(sel)]['Precipitation (mm)'].dropna()
         x_max = float(all_vals.quantile(0.99))
         x = np.linspace(0, x_max, 200)
 
-        # Pre-compute normalized KDE + stats per source (subsampled for speed)
         kde_store = {}
         for source in sel:
             v = df_melted[df_melted['Data Source'] == source]['Precipitation (mm)'].dropna()
@@ -254,7 +241,7 @@ with tab_data:
             if len(v) > 10000:
                 v = v.sample(10000, random_state=42)
             dens = stats.gaussian_kde(v)(x)
-            dens = dens / dens.max()  # normalize each ridge to unit peak
+            dens = dens / dens.max()
             kde_store[source] = {
                 'y': dens,
                 'mean': float(np.mean(v)),
@@ -267,12 +254,10 @@ with tab_data:
             'Raw ERA5-Land': '#ff7f0e',
             'Raw PERSIANN-CDR': '#2ca02c'
         }
-        # Helper function to convert hex to rgba for fills
         def get_rgba(h, a):
             n = int(h.lstrip('#'), 16)
             return f"rgba({(n>>16)&255},{(n>>8)&255},{n&255},{a})"
 
-        # Define colors
         color_map_hex = {
             'In-Situ Gauge (Truth)': '#d62728',
             'Raw CHIRPS': '#1f77b4',
@@ -281,7 +266,7 @@ with tab_data:
         }
 
         if viz_mode.startswith("Ridge"):
-            overlap = 0.55  # Controls the vertical spacing between ridges
+            overlap = 0.55
             fig = go.Figure()
             tickvals, ticktext = [], []
             
@@ -290,38 +275,28 @@ with tab_data:
                 off = i * overlap
                 tickvals.append(off)
                 ticktext.append(source)
-                
-                # ✅ FIX: Look up the specific hex string for this source
                 hexc = color_map_hex.get(source, '#636efa') 
 
-                # 1. Baseline separator (thin light line for dark mode)
                 fig.add_trace(go.Scatter(
                     x=x, y=[off]*len(x), mode='lines',
                     line=dict(width=1, color='rgba(255,255,255,0.2)'),
                     hoverinfo='skip', showlegend=False
                 ))
-                
-                # 2. Filled Ridge
                 fig.add_trace(go.Scatter(
                     x=x, y=off + d['y'], mode='lines', name=source,
                     line=dict(color=hexc, width=2),
                     fill='tonexty', fillcolor=get_rgba(hexc, 0.7),
                     hovertemplate=f"<b>{source}</b><br>Precip: %{{x:.1f}} mm<br><extra></extra>"
                 ))
-                
-                # 3. Mean Line (White for contrast against dark fills)
                 fig.add_trace(go.Scatter(
                     x=[d['mean'], d['mean']], y=[off, off + 1.0], mode='lines',
                     line=dict(color='white', dash='dash', width=2),
                     hoverinfo='skip', showlegend=False
                 ))
-                
-                # 4. Annotation (Standardized with Overlaid KDE style)
                 fig.add_annotation(
                     x=d['mean'], y=off + 1.05, 
                     text=f"μ={d['mean']:.0f} σ={d['std']:.0f}",
                     showarrow=False, 
-                    # ✅ FIX: Use the specific hex string, not the dictionary
                     font=dict(size=10, color=hexc, family="Arial Black"),
                     align="center",
                     bgcolor='rgba(255,255,255,0.9)', 
@@ -331,12 +306,11 @@ with tab_data:
                     yanchor='bottom'
                 )
 
-            # Layout Fixes for Dark Mode & Readability
             fig.update_layout(
                 height=max(400, len(kde_store) * 120),
-                plot_bgcolor='rgba(0,0,0,0)',   # Transparent background
-                paper_bgcolor='rgba(0,0,0,0)',  # Transparent paper
-                font=dict(color='white'),       # White text for axis labels
+                plot_bgcolor='rgba(0,0,0,0)',
+                paper_bgcolor='rgba(0,0,0,0)',
+                font=dict(color='white'),
                 xaxis=dict(
                     title="Monthly Precipitation (mm)", 
                     range=[0, x_max],
@@ -353,7 +327,7 @@ with tab_data:
                 ),
                 hovermode='closest', 
                 showlegend=False,
-                margin=dict(l=150, r=20, t=20, b=50) # Extra left margin for station names
+                margin=dict(l=150, r=20, t=20, b=50)
             )
             st.plotly_chart(fig, use_container_width=True)
 
@@ -365,7 +339,7 @@ with tab_data:
                 fig.add_trace(go.Scatter(
                     x=x, y=d['y'], mode='lines', name=source,
                     line=dict(color=hexc, width=2.5),
-                    fill='tozeroy', fillcolor=rgba(hexc, 0.15),
+                    fill='tozeroy', fillcolor=get_rgba(hexc, 0.15),  # ===== FIX #2: was rgba() =====
                     hovertemplate=f"<b>{source}</b><br>Precip: %{{x:.1f}} mm<br>Density: %{{y:.4f}}<extra></extra>"
                 ))
                 fig.add_trace(go.Scatter(
@@ -415,7 +389,6 @@ with tab_data:
     st.markdown("#### 🏆 Station-Level Peer Comparison")
     st.caption("Compare monthly precipitation distributions across specific stations. The box height auto-scales with the number of stations and sources for readability.")
 
-    # A. Clean station names (fixes the 'nan (ID)' tags)
     name_map = (
         df.drop_duplicates('station_id')
           .set_index('station_id')['station_name']
@@ -438,7 +411,6 @@ with tab_data:
         df_station_filtered = df[df['station_id'].isin(selected_station_ids)].copy()
         df_station_filtered['station_name'] = df_station_filtered['station_name'].fillna('Unknown')
 
-        # B. Data source selection
         plot_cols = ['Gauge_Observed', 'precip_chirps', 'precip_era5_land', 'precip_persiann']
         source_options = [c for c in plot_cols if c in df_station_filtered.columns]
         selected_box_sources = st.multiselect(
@@ -448,7 +420,6 @@ with tab_data:
         )
 
         if selected_box_sources:
-            # Optional UX toggle: hide outlier dots for a cleaner read
             show_outliers = st.checkbox(
                 "Show extreme rainfall outliers (points)",
                 value=True,
@@ -468,7 +439,6 @@ with tab_data:
             })
             df_box['Station_Display'] = df_box['station_name'] + " (" + df_box['station_id'] + ")"
 
-            # ✅ FIX #3: height scales with stations × sources (capped so the page stays scrollable)
             plot_height = min(2400, max(500, len(selected_station_ids) * len(selected_box_sources) * 45))
 
             fig_box = px.box(
@@ -487,16 +457,15 @@ with tab_data:
                 height=plot_height
             )
 
-            # ✅ Styling: mean line + thinner boxes + smaller outlier dots = readable clusters
             fig_box.update_traces(
-                boxmean=True,                 # dashed line = mean (great for bias spotting)
+                boxmean=True,
                 marker=dict(size=4, opacity=0.6),
                 line=dict(width=1.5)
             )
             fig_box.update_layout(
                 yaxis_title="Station",
                 xaxis_title="Monthly Precipitation (mm)",
-                hovermode="closest",          # 'x unified' is messy on boxplots
+                hovermode="closest",
                 yaxis=dict(tickfont=dict(size=11)),
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
             )
@@ -507,7 +476,6 @@ with tab_data:
 
         st.markdown("---")
 
-        # C. Synchronized Tabular Data (Drill-down)
         st.markdown("##### 📋 Detailed Station Metrics")
         st.caption("Aggregate statistics for the selected stations. **Click column headers to sort** (e.g., sort by 'CHIRPS Bias (%)' to find the worst overestimators).")
 
@@ -526,7 +494,6 @@ with tab_data:
 
         filtered_station_stats = df_station_filtered.groupby('station_id').agg(**agg_dict).reset_index()
 
-        # ✅ FIX #1: gate on the columns that actually EXIST after aggregation
         if 'Mean_Gauge' in filtered_station_stats.columns and 'Gauge_Months' in filtered_station_stats.columns:
             filtered_station_stats['Data_Completeness_%'] = (
                 filtered_station_stats['Gauge_Months'] / filtered_station_stats['Total_Months'] * 100
@@ -558,7 +525,6 @@ with tab_data:
                 display_cols.append(label)
                 column_config[label] = st.column_config.NumberColumn(fmt, format="%.1f%%", help="Positive = Overestimation vs Gauge")
 
-        # ✅ FIX #1 (belt-and-braces): only render columns that truly exist
         display_cols = [c for c in display_cols if c in filtered_station_stats.columns]
 
         st.dataframe(
@@ -673,9 +639,8 @@ with tab_explore:
 # ==============================================================================
 with tab_tca:
     st.markdown("### 📐 Triple Collocation Analysis (TCA) Diagnostics")
-    st.write("Evaluating the random error variance ($\sigma_\epsilon$) and data-truth correlation ($R$) of satellite products without assuming a ground truth.")
+    st.write("Evaluating the random error variance (σₑ) and data-truth correlation (R) of satellite products without assuming a ground truth.")
     
-    # 1. Calculate Station-Level Metrics (Cached for performance)
     with st.spinner("Calculating station-level TCA metrics..."):
         tca_metrics_df = calculate_station_tca_metrics(df)
         
@@ -686,9 +651,9 @@ with tab_tca:
     st.markdown("---")
     
     # ==========================================================================
-    # VISUAL 1: Multi-Panel Spatial Error Map (Lecturer's Viz #1)
+    # VISUAL 1: Multi-Panel Spatial Error Map  ===== FIX #1 (PyDeck, not Mapbox) =====
     # ==========================================================================
-    st.markdown("#### 🗺️ 1. Spatial Distribution of TCA Error Standard Deviation ($\sigma_\epsilon$)")
+    st.markdown("#### 🗺️ 1. Spatial Distribution of TCA Error Standard Deviation (σₑ)")
     st.caption("Maps the random error (mm/month) across Sarawak. Higher values indicate greater uncertainty, often amplified by topographic complexity or coastal convection.")
     
     metric_to_map = st.radio(
@@ -696,28 +661,51 @@ with tab_tca:
         ['CHIRPS', 'PERSIANN-CDR', 'ERA5-Land'], 
         horizontal=True, index=0
     )
-    
     col_map = f"{metric_to_map.lower().replace('-cdr', '').replace('-land', '')}_se"
     
-    fig_map = px.scatter_mapbox(
-        tca_metrics_df, 
-        lat="lat", lon="lon", 
-        color=col_map,
-        size=col_map,
-        color_continuous_scale="Turbo", # Excellent for scientific error mapping
-        size_max=15,
-        zoom=6,
-        center={"lat": 2.5, "lon": 112.5},
-        hover_data=['station_id', 'elev_m', 'zone', col_map],
-        labels={col_map: f'Error Std Dev (mm/month)'}
-    )
+    # Build a continuous color ramp (blue -> yellow -> red) in PyDeck
+    map_df = tca_metrics_df[['station_id', 'lon', 'lat', 'elev_m', 'zone', col_map]].dropna().copy()
+    vmin, vmax = map_df[col_map].min(), map_df[col_map].max()
+    def _err_to_rgb(v):
+        if vmax == vmin:
+            t = 0.5
+        else:
+            t = (v - vmin) / (vmax - vmin)
+        if t < 0.5:
+            k = t / 0.5
+            r = int(40 + (250 - 40) * k)
+            g = int(100 + (200 - 100) * k)
+            b = int(200 + (40 - 200) * k)
+        else:
+            k = (t - 0.5) / 0.5
+            r = int(250 + (220 - 250) * k)
+            g = int(200 + (30 - 200) * k)
+            b = int(40 + (30 - 40) * k)
+        return [r, g, b, 255]
+    map_df['color'] = map_df[col_map].apply(_err_to_rgb)
+    map_df['radius'] = 4000 + 6000 * ((map_df[col_map] - vmin) / (vmax - vmin) if vmax > vmin else 0)
     
-    fig_map.update_layout(
-        mapbox_style="open-street-map",
-        height=500,
-        margin={"r":0,"t":0,"l":0,"b":0}
+    view_state = pdk.ViewState(latitude=2.5, longitude=112.5, zoom=6, pitch=0)
+    layer = pdk.Layer(
+        "ScatterplotLayer",
+        data=map_df,
+        get_position="[lon, lat]",
+        get_color="color",
+        get_radius="radius",
+        pickable=True,
+        stroked=True,
+        get_line_color=[255, 255, 255, 200],
+        get_line_width=1
     )
-    st.plotly_chart(fig_map, use_container_width=True)
+    tooltip = {
+        "html": "<b>📍 Station: {station_id}</b><br/>"
+                "<b>Zone:</b> {zone}<br/>"
+                "<b>Elev:</b> {elev_m} m<br/>"
+                f"<b>{metric_to_map} σₑ:</b> {{{col_map}}} mm/month",
+        "style": {"backgroundColor": "#222", "color": "white"}
+    }
+    st.pydeck_chart(pdk.Deck(map_style='road', initial_view_state=view_state, layers=[layer], tooltip=tooltip, height=500))
+    st.caption("🔵 Low error (reliable)  →  🟡 Moderate  →  🔴 High error (uncertain). Marker size also scales with error magnitude.")
     
     st.markdown("---")
     
@@ -727,10 +715,9 @@ with tab_tca:
     st.markdown("#### 📦 2. Sub-Regional Error & Correlation Distributions")
     st.caption("Stratifying station-level TCA metrics by terrain zones (Coastal <100m, Inland 100-500m, Highland >500m) to diagnose terrain-dependent biases.")
     
-    # Melt the dataframe for easy plotting
     plot_metric = st.radio(
         "Select Metric to Analyze:",
-        ['Error Std Dev ($\sigma_\epsilon$)', 'Data-Truth Correlation ($R$)', 'Signal-to-Noise Ratio (SNR)'],
+        ['Error Std Dev (σₑ)', 'Data-Truth Correlation (R)', 'Signal-to-Noise Ratio (SNR)'],
         horizontal=True, index=1
     )
     
@@ -769,7 +756,7 @@ with tab_tca:
     
     fig_box.update_layout(
         height=450,
-        boxmode='group', # Group boxes by zone
+        boxmode='group',
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
     st.plotly_chart(fig_box, use_container_width=True)
@@ -780,9 +767,8 @@ with tab_tca:
     # VISUAL 3: Ternary Simplex (Lecturer's Viz #6 - Refined)
     # ==========================================================================
     st.markdown("#### 🔺 3. Barycentric Merging Weight Simplex")
-    st.caption("Optimal inverse-variance weights ($w_i \propto 1/\sigma_{\epsilon,i}^2$) for data fusion. Points closer to a corner indicate that product dominates the fusion for that specific station.")
+    st.caption("Optimal inverse-variance weights (wᵢ ∝ 1/σ²ᵢ) for data fusion. Points closer to a corner indicate that product dominates the fusion for that specific station.")
     
-    # Calculate weights on the fly from the error variances
     tca_metrics_df['inv_c'] = 1 / (tca_metrics_df['chirps_se']**2)
     tca_metrics_df['inv_p'] = 1 / (tca_metrics_df['persiann_se']**2)
     tca_metrics_df['inv_e'] = 1 / (tca_metrics_df['era5_se']**2)
@@ -849,8 +835,6 @@ with tab_ml:
         st.dataframe(display_lb.style.highlight_max(axis=0, subset=['Composite_Score'], color='#d4edda'), hide_index=True, use_container_width=True)
 
         st.markdown("#### 📊 Unified Performance Comparison")
-        marker_shapes = {'Linear Regression': 'square', 'Random Forest': 'square', 'Gradient Boosting': 'square', 'Neural Network (MLP)': 'square', 'SVR': 'square'}
-        
         fig_scatter = go.Figure()
         MAX_POINTS = 15000 
         
