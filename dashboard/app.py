@@ -97,6 +97,76 @@ if 'Gauge_Observed' in df.columns:
     PRECIP_SOURCES['Gauge_Observed'] = 'In-Situ Gauge (Truth)'
 
 # ==============================================================================
+# THE STATION-LEVEL TCA CALCULATOR
+# ==============================================================================
+import warnings
+warnings.filterwarnings('ignore')
+
+@st.cache_data(ttl=3600)
+def calculate_station_tca_metrics(df):
+    """Calculates TCA error std dev, Correlation (R), and SNR for each station."""
+    results = []
+    # Filter for wet days only (required for log-space TCA)
+    df_wet = df[(df['precip_chirps'] > 0) & (df['precip_era5_land'] > 0) & (df['precip_persiann'] > 0)].copy()
+    
+    for stn_id, group in df_wet.groupby('station_id'):
+        if len(group) < 50: continue # Need minimum samples for stability
+        
+        # Log transform
+        x = np.log(group['precip_chirps'].values)
+        y = np.log(group['precip_persiann'].values)
+        z = np.log(group['precip_era5_land'].values)
+        
+        # Covariances
+        cov_xy = np.cov(x, y, ddof=1)[0, 1]
+        cov_xz = np.cov(x, z, ddof=1)[0, 1]
+        cov_yz = np.cov(y, z, ddof=1)[0, 1]
+        
+        # Variances
+        var_x, var_y, var_z = np.var(x, ddof=1), np.var(y, ddof=1), np.var(z, ddof=1)
+        
+        eps = 1e-9
+        
+        # Error Variances (McColl et al., 2014)
+        se_x = max(var_x - (cov_xy * cov_xz) / max(cov_yz, eps), eps)
+        se_y = max(var_y - (cov_xy * cov_yz) / max(cov_xz, eps), eps)
+        se_z = max(var_z - (cov_xz * cov_yz) / max(cov_xy, eps), eps)
+        
+        # Signal Variances (True signal variance estimated from each product)
+        sig_x = (cov_xy * cov_xz) / max(cov_yz, eps)
+        sig_y = (cov_xy * cov_yz) / max(cov_xz, eps)
+        sig_z = (cov_xz * cov_yz) / max(cov_xy, eps)
+        
+        # Data-Truth Correlation (R)
+        r_x = np.sqrt(sig_x / (sig_x + se_x))
+        r_y = np.sqrt(sig_y / (sig_y + se_y))
+        r_z = np.sqrt(sig_z / (sig_z + se_z))
+        
+        # SNR (dB)
+        snr_x = 10 * np.log10(sig_x / se_x)
+        snr_y = 10 * np.log10(sig_y / se_y)
+        snr_z = 10 * np.log10(sig_z / se_z)
+        
+        # Get metadata
+        meta = group.iloc[0]
+        
+        # Classify Zone based on Elevation (Sarawak context)
+        elev = meta['elev_m']
+        if elev < 100: zone = 'Coastal'
+        elif elev < 500: zone = 'Inland'
+        else: zone = 'Highland'
+        
+        results.append({
+            'station_id': stn_id, 'lon': meta['lon'], 'lat': meta['lat'], 
+            'elev_m': elev, 'zone': zone,
+            'chirps_se': np.sqrt(se_x), 'persiann_se': np.sqrt(se_y), 'era5_se': np.sqrt(se_z),
+            'chirps_R': r_x, 'persiann_R': r_y, 'era5_R': r_z,
+            'chirps_snr': snr_x, 'persiann_snr': snr_y, 'era5_snr': snr_z
+        })
+        
+    return pd.DataFrame(results)
+
+# ==============================================================================
 # TAB SETUP
 # ==============================================================================
 tab_data, tab_explore, tab_tca, tab_ml, tab_xai, tab_drought, tab_future = st.tabs([
@@ -599,176 +669,153 @@ with tab_explore:
                     st.plotly_chart(fig, use_container_width=True)
 
 # ==============================================================================
-# TAB 3: TCA WEIGHT ANALYSIS (OPTIMIZED & PDF-ALIGNED)
+# TAB 3: TCA WEIGHT & ERROR ANALYSIS (UPGRADED)
 # ==============================================================================
 with tab_tca:
-    st.markdown("### 📐 Triple Collocation Analysis (TCA) Weight Allocation")
-    st.write("This module evaluates the inverse-variance weights assigned to each satellite product. Higher weights indicate lower random error variance (higher reliability) in that specific regime.")
+    st.markdown("### 📐 Triple Collocation Analysis (TCA) Diagnostics")
+    st.write("Evaluating the random error variance ($\sigma_\epsilon$) and data-truth correlation ($R$) of satellite products without assuming a ground truth.")
     
-    # Reference the PDF's core concept
-    st.info("📖 **Scientific Context:** Following TCA methodology (McColl et al., 2014), weights are derived from mutual log-space covariance. As noted in the presentation guide, these weights are *regime-dependent*—shifting significantly across monsoon seasons and elevation quartiles.")
-
-    # 1. Stratification Selector
-    strat_level = st.radio("Select Stratification Level to Analyze:", 
-                           options=["Global", "Seasonal", "Elevation", "Hierarchical"], 
-                           horizontal=True)
+    # 1. Calculate Station-Level Metrics (Cached for performance)
+    with st.spinner("Calculating station-level TCA metrics..."):
+        tca_metrics_df = calculate_station_tca_metrics(df)
+        
+    if tca_metrics_df.empty:
+        st.error("Could not calculate TCA metrics. Ensure wet-day data is sufficient.")
+        st.stop()
+        
+    st.markdown("---")
     
-    @st.cache_data
-    def compute_all_tca_weights(file_path):
-        df_temp = pd.read_parquet(file_path)
-        valid = df_temp[(df_temp['precip_chirps'] > 0) & 
-                        (df_temp['precip_era5_land'] > 0) & 
-                        (df_temp['precip_persiann'] > 0)].copy()
-        
-        def get_w(data, target_col):
-            if len(data) < 5: return [np.nan, np.nan, np.nan]
-            try:
-                X = np.log(data[['precip_chirps', 'precip_era5_land', 'precip_persiann']].values)
-                y = np.log(data[target_col].values)
-                w, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
-                return w
-            except Exception: return [np.nan, np.nan, np.nan]
-        
-        w_g = get_w(valid, 'P_merged_global')
-        df_g = pd.DataFrame([{"Stratum": "Global", "CHIRPS": w_g[0], "ERA5-Land": w_g[1], "PERSIANN-CDR": w_g[2]}])
-        
-        records_s = [{"Stratum": s, "CHIRPS": w[0], "ERA5-Land": w[1], "PERSIANN-CDR": w[2]} 
-                     for s in sorted(valid['season'].dropna().unique()) 
-                     for w in [get_w(valid[valid['season'] == s], 'P_merged_season')]]
-        df_s = pd.DataFrame(records_s)
-        
-        records_e = [{"Stratum": e, "CHIRPS": w[0], "ERA5-Land": w[1], "PERSIANN-CDR": w[2]} 
-                     for e in sorted(valid['elev_bin'].dropna().unique(), reverse=True) 
-                     for w in [get_w(valid[valid['elev_bin'] == e], 'P_merged_elev')]]
-        df_e = pd.DataFrame(records_e)
-        
-        records_h = [{"Stratum": h, "CHIRPS": w[0], "ERA5-Land": w[1], "PERSIANN-CDR": w[2]} 
-                     for h in sorted(valid['stratum_hier'].dropna().unique()) 
-                     for w in [get_w(valid[valid['stratum_hier'] == h], 'P_merged_hier')]]
-        df_h = pd.DataFrame(records_h)
-        
-        return df_g, df_s, df_e, df_h
-
-    file_path = str(project_root / "outputs" / "processed" / "sarawak_TCA_fused.parquet")
-    with st.spinner("Calculating TCA weights..."):
-        df_g, df_s, df_e, df_h = compute_all_tca_weights(file_path)
-        gc.collect()
+    # ==========================================================================
+    # VISUAL 1: Multi-Panel Spatial Error Map (Lecturer's Viz #1)
+    # ==========================================================================
+    st.markdown("#### 🗺️ 1. Spatial Distribution of TCA Error Standard Deviation ($\sigma_\epsilon$)")
+    st.caption("Maps the random error (mm/month) across Sarawak. Higher values indicate greater uncertainty, often amplified by topographic complexity or coastal convection.")
     
-    weights_map = {"Global": df_g, "Seasonal": df_s, "Elevation": df_e, "Hierarchical": df_h}
-    weights_df = weights_map.get(strat_level, df_g)
+    metric_to_map = st.radio(
+        "Select Product to Map:", 
+        ['CHIRPS', 'PERSIANN-CDR', 'ERA5-Land'], 
+        horizontal=True, index=0
+    )
     
-    if weights_df.empty or weights_df['CHIRPS'].isna().all():
-        st.warning("⚠️ No valid TCA weights could be calculated for this stratum.")
+    col_map = f"{metric_to_map.lower().replace('-cdr', '').replace('-land', '')}_se"
+    
+    fig_map = px.scatter_mapbox(
+        tca_metrics_df, 
+        lat="lat", lon="lon", 
+        color=col_map,
+        size=col_map,
+        color_continuous_scale="Turbo", # Excellent for scientific error mapping
+        size_max=15,
+        zoom=6,
+        center={"lat": 2.5, "lon": 112.5},
+        hover_data=['station_id', 'elev_m', 'zone', col_map],
+        labels={col_map: f'Error Std Dev (mm/month)'}
+    )
+    
+    fig_map.update_layout(
+        mapbox_style="open-street-map",
+        height=500,
+        margin={"r":0,"t":0,"l":0,"b":0}
+    )
+    st.plotly_chart(fig_map, use_container_width=True)
+    
+    st.markdown("---")
+    
+    # ==========================================================================
+    # VISUAL 2: Sub-Regional Boxplots (Lecturer's Viz #2)
+    # ==========================================================================
+    st.markdown("#### 📦 2. Sub-Regional Error & Correlation Distributions")
+    st.caption("Stratifying station-level TCA metrics by terrain zones (Coastal <100m, Inland 100-500m, Highland >500m) to diagnose terrain-dependent biases.")
+    
+    # Melt the dataframe for easy plotting
+    plot_metric = st.radio(
+        "Select Metric to Analyze:",
+        ['Error Std Dev ($\sigma_\epsilon$)', 'Data-Truth Correlation ($R$)', 'Signal-to-Noise Ratio (SNR)'],
+        horizontal=True, index=1
+    )
+    
+    if 'Error' in plot_metric:
+        value_cols = ['chirps_se', 'persiann_se', 'era5_se']
+        names = ['CHIRPS', 'PERSIANN-CDR', 'ERA5-Land']
+        y_label = "Error Std Dev (mm/month)"
+    elif 'Correlation' in plot_metric:
+        value_cols = ['chirps_R', 'persiann_R', 'era5_R']
+        names = ['CHIRPS', 'PERSIANN-CDR', 'ERA5-Land']
+        y_label = "Correlation with Unknown Truth (R)"
     else:
-        # --- VISUAL 1: THE TERNARY SIMPLEX (PDF Figure 7) ---
-        st.markdown("#### 🔺 1. Ternary Merging Weight Simplex")
-        st.caption("Maps optimal TCA inverse-variance weights ($w_i \propto 1/\sigma_{\epsilon,i}^2$). Points closer to a vertex indicate that product dominates the fusion in that regime.")
+        value_cols = ['chirps_snr', 'persiann_snr', 'era5_snr']
+        names = ['CHIRPS', 'PERSIANN-CDR', 'ERA5-Land']
+        y_label = "SNR (dB)"
         
-        fig_tern = px.scatter_ternary(
-            weights_df, 
-            a="PERSIANN-CDR", b="CHIRPS", c="ERA5-Land", 
-            hover_name="Stratum", 
-            color="Stratum" if strat_level != "Global" else None, 
-            color_discrete_sequence=px.colors.qualitative.Bold if strat_level == "Global" else None,
-            size_max=15,
-            opacity=0.8
+    df_box = pd.melt(
+        tca_metrics_df, 
+        id_vars=['zone'], 
+        value_vars=value_cols, 
+        var_name='Product', 
+        value_name='Value'
+    )
+    df_box['Product'] = df_box['Product'].map(dict(zip(value_cols, names)))
+    
+    fig_box = px.box(
+        df_box, 
+        x='zone', 
+        y='Value', 
+        color='Product',
+        color_discrete_map={'CHIRPS': '#1f77b4', 'PERSIANN-CDR': '#ff7f0e', 'ERA5-Land': '#2ca02c'},
+        points="outliers",
+        labels={'zone': 'Terrain Zone', 'Value': y_label},
+        category_orders={'zone': ['Coastal', 'Inland', 'Highland']}
+    )
+    
+    fig_box.update_layout(
+        height=450,
+        boxmode='group', # Group boxes by zone
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+    st.plotly_chart(fig_box, use_container_width=True)
+
+    st.markdown("---")
+    
+    # ==========================================================================
+    # VISUAL 3: Ternary Simplex (Lecturer's Viz #6 - Refined)
+    # ==========================================================================
+    st.markdown("#### 🔺 3. Barycentric Merging Weight Simplex")
+    st.caption("Optimal inverse-variance weights ($w_i \propto 1/\sigma_{\epsilon,i}^2$) for data fusion. Points closer to a corner indicate that product dominates the fusion for that specific station.")
+    
+    # Calculate weights on the fly from the error variances
+    tca_metrics_df['inv_c'] = 1 / (tca_metrics_df['chirps_se']**2)
+    tca_metrics_df['inv_p'] = 1 / (tca_metrics_df['persiann_se']**2)
+    tca_metrics_df['inv_e'] = 1 / (tca_metrics_df['era5_se']**2)
+    total_inv = tca_metrics_df['inv_c'] + tca_metrics_df['inv_p'] + tca_metrics_df['inv_e']
+    
+    tca_metrics_df['w_chirps'] = tca_metrics_df['inv_c'] / total_inv
+    tca_metrics_df['w_persiann'] = tca_metrics_df['inv_p'] / total_inv
+    tca_metrics_df['w_era5'] = tca_metrics_df['inv_e'] / total_inv
+    
+    simplex_color = st.radio("Color Simplex By:", ['Elevation (m)', 'Terrain Zone'], horizontal=True)
+    color_col = 'elev_m' if simplex_color == 'Elevation (m)' else 'zone'
+    
+    fig_tern = px.scatter_ternary(
+        tca_metrics_df, 
+        a="w_persiann", b="w_chirps", c="w_era5", 
+        color=color_col,
+        color_continuous_scale="Viridis" if simplex_color == 'Elevation (m)' else None,
+        hover_name='station_id',
+        size_max=10,
+        opacity=0.7
+    )
+    
+    fig_tern.update_layout(
+        height=500,
+        ternary=dict(
+            sum=1,
+            aaxis=dict(title="PERSIANN-CDR Weight", tickformat=".2f"),
+            baxis=dict(title="CHIRPS Weight", tickformat=".2f"),
+            caxis=dict(title="ERA5-Land Weight", tickformat=".2f")
         )
-        fig_tern.update_traces(marker=dict(size=12, line=dict(width=1, color='DarkSlateGrey')))
-        fig_tern.update_layout(
-            height=500, margin={"r":20,"t":40,"l":20,"b":20},
-            ternary=dict(
-                sum=1, 
-                aaxis=dict(title="PERSIANN-CDR Weight", tickformat=".2f", tickfont=dict(size=10)),
-                baxis=dict(title="CHIRPS Weight", tickformat=".2f", tickfont=dict(size=10)),
-                caxis=dict(title="ERA5-Land Weight", tickformat=".2f", tickfont=dict(size=10))
-            )
-        )
-        st.plotly_chart(fig_tern, use_container_width=True)
-
-        st.markdown("---")
-
-        # --- VISUAL 2: REGIME-DEPENDENT HEATMAPS (PDF Figure 1/2 Adaptation) ---
-        st.markdown("#### 🌡️ 2. Regime-Dependent Reliability Heatmaps")
-        st.caption("Visualizes how satellite reliability shifts across Monsoon Seasons (Left) and Elevation Quartiles (Right). Yellow = High Weight (Low Error).")
-        
-        col_h1, col_h2 = st.columns(2)
-        
-        with col_h1:
-            st.markdown("**Seasonal Weights**")
-            # Ensure correct order for seasons
-            season_order = ['NEM', 'Inter', 'SWM']
-            df_s_sorted = df_s[df_s['Stratum'].isin(season_order)].copy()
-            df_s_sorted['Stratum'] = pd.Categorical(df_s_sorted['Stratum'], categories=season_order, ordered=True)
-            df_s_sorted = df_s_sorted.sort_values('Stratum')
-            
-            if not df_s_sorted.empty:
-                heat_data_s = df_s_sorted[['CHIRPS', 'ERA5-Land', 'PERSIANN-CDR']].values
-                fig_heat_s = go.Figure(data=go.Heatmap(
-                    z=heat_data_s,
-                    x=['CHIRPS', 'ERA5-Land', 'PERSIANN-CDR'],
-                    y=df_s_sorted['Stratum'],
-                    colorscale='YlOrRd', # Yellow to Red is better for "Heat/Reliability"
-                    text=np.round(heat_data_s, 3),
-                    texttemplate="%{text}",
-                    hoverongaps=False,
-                    colorbar=dict(title="Weight")
-                ))
-                fig_heat_s.update_layout(height=300, margin={"r":20,"t":20,"l":20,"b":20}, yaxis=dict(autorange="reversed"))
-                st.plotly_chart(fig_heat_s, use_container_width=True)
-
-        with col_h2:
-            st.markdown("**Elevation Weights (Q1=Low, Q4=High)**")
-            if not df_e.empty:
-                heat_data_e = df_e[['CHIRPS', 'ERA5-Land', 'PERSIANN-CDR']].values
-                fig_heat_e = go.Figure(data=go.Heatmap(
-                    z=heat_data_e,
-                    x=['CHIRPS', 'ERA5-Land', 'PERSIANN-CDR'],
-                    y=df_e['Stratum'],
-                    colorscale='YlOrRd',
-                    text=np.round(heat_data_e, 3),
-                    texttemplate="%{text}",
-                    hoverongaps=False,
-                    colorbar=dict(title="Weight")
-                ))
-                fig_heat_e.update_layout(height=300, margin={"r":20,"t":20,"l":20,"b":20}, yaxis=dict(autorange="reversed"))
-                st.plotly_chart(fig_heat_e, use_container_width=True)
-
-        st.markdown("---")
-
-        # --- VISUAL 3: RELIABILITY SHIFT BAR CHART (PDF Figure 2 Concept) ---
-        st.markdown("#### 📊 3. Reliability Shift Across Elevation Quartiles")
-        st.caption("Grouped bar chart showing the evolution of satellite weights from Lowland (Q1) to Highland (Q4) regimes. Highlights the impact of orographic lifting on satellite performance.")
-        
-        if not df_e.empty:
-            df_e_melt = df_e.melt(id_vars='Stratum', var_name='Product', value_name='Weight')
-            
-            fig_bar = px.bar(
-                df_e_melt, 
-                x='Stratum', 
-                y='Weight', 
-                color='Product',
-                barmode='group',
-                text='Weight',
-                color_discrete_map={
-                    'CHIRPS': '#1f77b4', 
-                    'ERA5-Land': '#ff7f0e', 
-                    'PERSIANN-CDR': '#2ca02c'
-                },
-                height=400
-            )
-            fig_bar.update_traces(texttemplate='%{text:.2f}', textposition='outside')
-            fig_bar.update_layout(
-                xaxis_title="Elevation Quartile (Q1=Lowest, Q4=Highest)",
-                yaxis_title="TCA Weight (Reliability)",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-            )
-            st.plotly_chart(fig_bar, use_container_width=True)
-
-        # --- RAW DATA EXPANDER ---
-        with st.expander("🔍 View Raw TCA Weight Data"):
-            st.dataframe(weights_df.style.format({"CHIRPS": "{:.3f}", "ERA5-Land": "{:.3f}", "PERSIANN-CDR": "{:.3f}"}), use_container_width=True)
-
-
+    )
+    st.plotly_chart(fig_tern, use_container_width=True)
+    
 # ==============================================================================
 # TAB 4: ML BIAS CORRECTION EVALUATION
 # ==============================================================================
