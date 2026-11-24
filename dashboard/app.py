@@ -45,7 +45,6 @@ with st.expander("ℹ️ Dashboard Help & User Guide"):
     **Welcome to the Sarawak Hydroclimate Dashboard!** This tool visualizes the performance of Satellite Precipitation Estimates (SPEs), Machine Learning bias correction, and future climate risk.
     
     - **📊 Data Characteristics**: Statistical overview, PDF distributions, and station-level peer comparison.
-    - **🗺️ Hydroclimate Explorer**: Explore raw and fused precipitation time series.
     - **📐 TCA Weight Analysis**: Analyze Triple Collocation Analysis weights.
     - **🤖 ML Model Evaluation**: Compare ML bias correction performance.
     - **🧠 Explainable AI (xAI)**: Understand ML decision-making using SHAP values.
@@ -64,12 +63,6 @@ LULC_MAP = {
     9: "Deciduous Needleleaf", 10: "Evergreen Broadleaf", 12: "Croplands", 
     13: "Urban & Built-Up", 14: "Cropland/Natural Mosaic", 15: "Snow & Ice", 
     16: "Barren or Sparsely Vegetated", 17: "Water Bodies"
-}
-
-PRECIP_SOURCES = {
-    'precip_chirps': 'Raw CHIRPS', 
-    'precip_era5_land': 'Raw ERA5-Land',
-    'precip_persiann': 'Raw PERSIANN-CDR'
 }
 
 # ==============================================================================
@@ -93,74 +86,11 @@ with st.spinner("Loading TCA-Fused Parquet Data..."):
     df = load_data()
     gc.collect()
 
-if 'Gauge_Observed' in df.columns:
-    PRECIP_SOURCES['Gauge_Observed'] = 'In-Situ Gauge (Truth)'
-
 # ==============================================================================
-# THE STATION-LEVEL & SEASONAL TCA CALCULATOR
+# TAB SETUP (6 TABS — Hydroclimate Explorer removed)
 # ==============================================================================
-import warnings
-warnings.filterwarnings('ignore')
-
-@st.cache_data(ttl=3600)
-def calculate_tca_metrics_with_seasons(df):
-    """Calculates TCA metrics per station AND per season for granular diagnostics."""
-    results = []
-    df_wet = df[(df['precip_chirps'] > 0) & (df['precip_era5_land'] > 0) & (df['precip_persiann'] > 0)].copy()
-    
-    # Group by station AND season
-    for (stn_id, season), group in df_wet.groupby(['station_id', 'season']):
-        if len(group) < 30: continue # 30 months = 10 years of data for one season (minimum for stability)
-        
-        x = np.log(group['precip_chirps'].values)
-        y = np.log(group['precip_persiann'].values)
-        z = np.log(group['precip_era5_land'].values)
-        
-        cov_xy = np.cov(x, y, ddof=1)[0, 1]
-        cov_xz = np.cov(x, z, ddof=1)[0, 1]
-        cov_yz = np.cov(y, z, ddof=1)[0, 1]
-        
-        var_x, var_y, var_z = np.var(x, ddof=1), np.var(y, ddof=1), np.var(z, ddof=1)
-        eps = 1e-9
-        
-        se_x = max(var_x - (cov_xy * cov_xz) / max(cov_yz, eps), eps)
-        se_y = max(var_y - (cov_xy * cov_yz) / max(cov_xz, eps), eps)
-        se_z = max(var_z - (cov_xz * cov_yz) / max(cov_xy, eps), eps)
-        
-        sig_x = (cov_xy * cov_xz) / max(cov_yz, eps)
-        sig_y = (cov_xy * cov_yz) / max(cov_xz, eps)
-        sig_z = (cov_xz * cov_yz) / max(cov_xy, eps)
-        
-        r_x = np.sqrt(sig_x / (sig_x + se_x))
-        r_y = np.sqrt(sig_y / (sig_y + se_y))
-        r_z = np.sqrt(sig_z / (sig_z + se_z))
-        
-        snr_x = 10 * np.log10(sig_x / se_x) if sig_x > 0 else np.nan
-        snr_y = 10 * np.log10(sig_y / se_y) if sig_y > 0 else np.nan
-        snr_z = 10 * np.log10(sig_z / se_z) if sig_z > 0 else np.nan
-        
-        meta = group.iloc[0]
-        elev = meta['elev_m']
-        if elev < 100: zone = 'Coastal'
-        elif elev < 500: zone = 'Inland'
-        else: zone = 'Highland'
-        
-        results.append({
-            'station_id': stn_id, 'season': season, 'lon': meta['lon'], 'lat': meta['lat'], 
-            'elev_m': elev, 'zone': zone,
-            'chirps_se': np.sqrt(se_x), 'persiann_se': np.sqrt(se_y), 'era5_se': np.sqrt(se_z),
-            'chirps_R': r_x, 'persiann_R': r_y, 'era5_R': r_z,
-            'chirps_snr': snr_x, 'persiann_snr': snr_y, 'era5_snr': snr_z
-        })
-        
-    return pd.DataFrame(results)
-
-# ==============================================================================
-# TAB SETUP
-# ==============================================================================
-tab_data, tab_explore, tab_tca, tab_ml, tab_xai, tab_drought, tab_future = st.tabs([
+tab_data, tab_tca, tab_ml, tab_xai, tab_drought, tab_future = st.tabs([
     "📊 Data Characteristics",
-    "🗺️ Hydroclimate Explorer", 
     "📐 TCA Weight Analysis", 
     "🤖 ML Model Evaluation", 
     "🧠 Explainable AI (xAI)", 
@@ -532,109 +462,68 @@ with tab_data:
             use_container_width=True,
             column_config=column_config
         )
-        
-# ==============================================================================
-# TAB 2: HYDROCLIMATE EXPLORER
-# ==============================================================================
-with tab_explore:
-    st.sidebar.markdown("### 🎛️ Explorer Controls")
-    
-    min_date, max_date = df['date'].min().date(), df['date'].max().date()
-    date_range = st.sidebar.slider("📅 Timeline", min_value=min_date, max_value=max_date, value=(min_date, max_date), format="YYYY-MM-DD")
-    plot_grouping = st.sidebar.radio("📊 Chart Display Mode", options=["By Station", "By Dataset"], index=0)
-    temporal_agg = st.sidebar.radio("⏱️ Temporal Resolution", options=["Monthly", "Annual Totals"], index=0)
-    
-    selected_precip = st.sidebar.multiselect("🌧️ Precipitation Sources", options=list(PRECIP_SOURCES.keys()), format_func=lambda x: PRECIP_SOURCES[x], default=['precip_chirps'])
-    
-    station_dict = df.drop_duplicates('station_id').set_index('station_id').get('station_name', pd.Series(index=df['station_id'].unique(), data="Unknown")).to_dict()
-    all_stations = sorted(df['station_id'].unique())
-    selected_stations = st.sidebar.multiselect("📍 Select Stations (Max 5)", options=all_stations, format_func=lambda x: f"{x} - {station_dict.get(x, 'Unknown')}", default=[all_stations[0]] if all_stations else [], max_selections=5)
-    
-    show_et = st.sidebar.selectbox("☀️ Evapotranspiration Data", options=["None", "ERA5-Land PET (mm)"], index=1)
-
-    st.markdown("---")
-
-    df_filtered = df[(df['date'].dt.date >= date_range[0]) & (df['date'].dt.date <= date_range[1])].copy()
-
-    if temporal_agg == "Annual Totals":
-        df_filtered['year'] = df_filtered['date'].dt.year
-        agg_dict = {src: 'sum' for src in PRECIP_SOURCES.keys() if src in df_filtered.columns}
-        if 'pet' in df_filtered.columns: agg_dict['pet'] = 'sum'
-        meta_cols = ['lon', 'lat', 'elev_m', 'Land_Use']
-        for col in meta_cols:
-            if col in df_filtered.columns: agg_dict[col] = 'first'
-        df_filtered = df_filtered.groupby(['station_id', 'year']).agg(agg_dict).reset_index()
-        df_filtered['date'] = pd.to_datetime(df_filtered['year'].astype(str) + '-07-01')
-
-    def calculate_metrics(data, sources, truth_col='Gauge_Observed'):
-        results = []
-        if truth_col not in data.columns: return pd.DataFrame()
-        for src in sources:
-            if src == truth_col or src not in data.columns: continue
-            valid_mask = data[src].notna() & data[truth_col].notna()
-            sim, obs = data.loc[valid_mask, src], data.loc[valid_mask, truth_col]
-            if len(sim) > 1:
-                results.append({"Product": PRECIP_SOURCES[src], "RMSE (mm)": round(np.sqrt(((sim - obs) ** 2).mean()), 2), "MAE (mm)": round(np.abs(sim - obs).mean(), 2), "CC (r)": round(np.corrcoef(sim, obs)[0, 1], 3)})
-        return pd.DataFrame(results)
-
-    col_plots, col_map = st.columns([2.5, 1])
-
-    with col_map:
-        st.markdown("### 🗺️ Spatial Collocation")
-        map_agg = {src: 'sum' for src in PRECIP_SOURCES.keys() if src in df_filtered.columns}
-        if 'pet' in df_filtered.columns: map_agg['pet'] = 'sum'
-        summary_df = df_filtered.groupby(['station_id', 'lon', 'lat', 'elev_m', 'Land_Use'], dropna=False).agg(map_agg).reset_index()
-        
-        for col in map_agg.keys(): summary_df[f"{col}_str"] = summary_df[col].apply(lambda x: f"{x:,.1f} mm" if pd.notnull(x) else "N/A")
-        
-        center_lat = summary_df['lat'].mean() if not summary_df.empty else 0
-        center_lon = summary_df['lon'].mean() if not summary_df.empty else 0
-        view_state = pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=6, pitch=0)
-        
-        unselected_df = summary_df[~summary_df['station_id'].isin(selected_stations)]
-        focus_df = summary_df[summary_df['station_id'].isin(selected_stations)]
-        
-        layers = []
-        if not unselected_df.empty: layers.append(pdk.Layer("ScatterplotLayer", data=unselected_df, get_position="[lon, lat]", get_color="[120, 120, 120, 140]", get_radius=4000, pickable=True))
-        if not focus_df.empty: layers.append(pdk.Layer("ScatterplotLayer", data=focus_df, get_position="[lon, lat]", get_color="[255, 50, 50, 255]", get_radius=8000, pickable=True))
-
-        tooltip_html = "<b>📍 Station: {station_id}</b><br/><b>Land Use:</b> {Land_Use}<br/><b>Elev:</b> {elev_m} m<hr style='margin: 8px 0px;'/>"
-        for src in selected_precip:
-            if src in summary_df.columns: tooltip_html += f"<b>{PRECIP_SOURCES[src]}:</b> {{{src}_str}}<br/>"
-                
-        st.pydeck_chart(pdk.Deck(map_style='road', initial_view_state=view_state, layers=layers, tooltip={"html": tooltip_html}, height=300))
-        
-        if 'Gauge_Observed' in df.columns and selected_stations:
-            metrics_df = calculate_metrics(df_filtered[df_filtered['station_id'].isin(selected_stations)], selected_precip)
-            if not metrics_df.empty: 
-                st.markdown("### 📈 Performance Metrics")
-                st.dataframe(metrics_df, hide_index=True, use_container_width=True)
-
-    with col_plots:
-        st.markdown("### 📊 Hydroclimatic Time Series")
-        if not selected_stations or not selected_precip:
-            st.warning("👈 Please select at least one station and one precipitation source from the sidebar.")
-        else:
-            color_map = {'precip_chirps': '#1f77b4', 'precip_era5_land': '#ff7f0e', 'precip_persiann': '#2ca02c', 'Gauge_Observed': '#d62728'}
-            if plot_grouping == "By Station":
-                for station in selected_stations:
-                    station_data = df_filtered[df_filtered['station_id'] == station].sort_values('date')
-                    fig = make_subplots(rows=2 if show_et != "None" else 1, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3] if show_et != "None" else [1.0])
-                    
-                    for src in selected_precip:
-                        fig.add_trace(go.Scatter(x=station_data['date'], y=station_data[src], name=PRECIP_SOURCES[src], mode='lines', line=dict(color=color_map.get(src, None), width=2)), row=1, col=1)
-                    
-                    if show_et != "None" and 'pet' in station_data.columns:
-                        fig.add_trace(go.Scatter(x=station_data['date'], y=station_data['pet'], name="PET", fill='tozeroy', line=dict(color='rgba(255, 165, 0, 0.8)', width=1)), row=2, col=1)
-                    
-                    if temporal_agg == "Annual Totals":
-                        fig.update_xaxes(tickformat="%Y")
-                        
-                    fig.update_layout(title=dict(text=f"<b>Station: {station}</b>"), height=400, margin={"r":20,"t":40,"l":20,"b":20}, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=10)), hovermode='x unified')
-                    st.plotly_chart(fig, use_container_width=True)
 
 # ==============================================================================
-# TAB 3: TCA WEIGHT & ERROR ANALYSIS (UPGRADED WITH SEASONAL STRATIFICATION)
+# THE STATION-LEVEL & SEASONAL TCA CALCULATOR
+# ==============================================================================
+import warnings
+warnings.filterwarnings('ignore')
+
+@st.cache_data(ttl=3600)
+def calculate_tca_metrics_with_seasons(df):
+    """Calculates TCA metrics per station AND per season for granular diagnostics."""
+    results = []
+    df_wet = df[(df['precip_chirps'] > 0) & (df['precip_era5_land'] > 0) & (df['precip_persiann'] > 0)].copy()
+    
+    # Group by station AND season
+    for (stn_id, season), group in df_wet.groupby(['station_id', 'season']):
+        if len(group) < 30: continue # 30 months = 10 years of data for one season (minimum for stability)
+        
+        x = np.log(group['precip_chirps'].values)
+        y = np.log(group['precip_persiann'].values)
+        z = np.log(group['precip_era5_land'].values)
+        
+        cov_xy = np.cov(x, y, ddof=1)[0, 1]
+        cov_xz = np.cov(x, z, ddof=1)[0, 1]
+        cov_yz = np.cov(y, z, ddof=1)[0, 1]
+        
+        var_x, var_y, var_z = np.var(x, ddof=1), np.var(y, ddof=1), np.var(z, ddof=1)
+        eps = 1e-9
+        
+        se_x = max(var_x - (cov_xy * cov_xz) / max(cov_yz, eps), eps)
+        se_y = max(var_y - (cov_xy * cov_yz) / max(cov_xz, eps), eps)
+        se_z = max(var_z - (cov_xz * cov_yz) / max(cov_xy, eps), eps)
+        
+        sig_x = (cov_xy * cov_xz) / max(cov_yz, eps)
+        sig_y = (cov_xy * cov_yz) / max(cov_xz, eps)
+        sig_z = (cov_xz * cov_yz) / max(cov_xy, eps)
+        
+        r_x = np.sqrt(sig_x / (sig_x + se_x))
+        r_y = np.sqrt(sig_y / (sig_y + se_y))
+        r_z = np.sqrt(sig_z / (sig_z + se_z))
+        
+        snr_x = 10 * np.log10(sig_x / se_x) if sig_x > 0 else np.nan
+        snr_y = 10 * np.log10(sig_y / se_y) if sig_y > 0 else np.nan
+        snr_z = 10 * np.log10(sig_z / se_z) if sig_z > 0 else np.nan
+        
+        meta = group.iloc[0]
+        elev = meta['elev_m']
+        if elev < 100: zone = 'Coastal'
+        elif elev < 500: zone = 'Inland'
+        else: zone = 'Highland'
+        
+        results.append({
+            'station_id': stn_id, 'season': season, 'lon': meta['lon'], 'lat': meta['lat'], 
+            'elev_m': elev, 'zone': zone,
+            'chirps_se': np.sqrt(se_x), 'persiann_se': np.sqrt(se_y), 'era5_se': np.sqrt(se_z),
+            'chirps_R': r_x, 'persiann_R': r_y, 'era5_R': r_z,
+            'chirps_snr': snr_x, 'persiann_snr': snr_y, 'era5_snr': snr_z
+        })
+        
+    return pd.DataFrame(results)
+
+# ==============================================================================
+# TAB 2: TCA WEIGHT & ERROR ANALYSIS (UPGRADED WITH SEASONAL STRATIFICATION)
 # ==============================================================================
 with tab_tca:
     st.markdown("### 📐 Triple Collocation Analysis (TCA) Diagnostics")
@@ -777,7 +666,6 @@ with tab_tca:
         opacity=0.6
     )
     
-    # ✅ FIX: Added the missing closing parenthesis ')' for update_layout
     fig_tern.update_layout(
         height=500,
         ternary=dict(
@@ -788,9 +676,9 @@ with tab_tca:
         )
     )
     st.plotly_chart(fig_tern, use_container_width=True)
-    
+
 # ==============================================================================
-# TAB 4: ML BIAS CORRECTION EVALUATION
+# TAB 3: ML BIAS CORRECTION EVALUATION
 # ==============================================================================
 with tab_ml:
     st.markdown("### 🤖 Machine Learning Bias Correction Performance")
@@ -943,7 +831,7 @@ with tab_ml:
 
 
 # ==============================================================================
-# TAB 5: EXPLAINABLE AI (xAI)
+# TAB 4: EXPLAINABLE AI (xAI)
 # ==============================================================================
 with tab_xai:
     st.markdown("### 🧠 Explainable AI: Decoding the Bias Correction")
@@ -981,7 +869,7 @@ with tab_xai:
 
 
 # ==============================================================================
-# TAB 6: DROUGHT EVENT ANALYSIS
+# TAB 5: DROUGHT EVENT ANALYSIS
 # ==============================================================================
 with tab_drought:
     st.markdown("### 🌵 Drought Event Analysis & Forecasting")
@@ -1069,7 +957,7 @@ with tab_drought:
 
 
 # ==============================================================================
-# TAB 7: FUTURE DROUGHT RISK PROJECTION (CMIP6)
+# TAB 6: FUTURE DROUGHT RISK PROJECTION (CMIP6)
 # ==============================================================================
 with tab_future:
     st.markdown("### 🔮 Future Drought Risk Projection (CMIP6)")
