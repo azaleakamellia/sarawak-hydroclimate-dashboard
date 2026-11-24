@@ -236,18 +236,21 @@ with tab_data:
                     hoverinfo='skip', showlegend=False
                 ))
                 
-                # 4. Annotation (Moved to BASELINE y=off+0.05 to avoid overlapping the curve above)
-                # Added a white background box so text is readable even if it touches the curve
+                # 4. Annotation (Standardized with Overlaid KDE style)
+                # Positioned just above the peak of the ridge to avoid overlapping the curve
                 fig.add_annotation(
-                    x=d['mean'], y=off + 0.08, # Positioned just above the baseline
-                    text=f"μ:{d['mean']:.0f} σ:{d['std']:.0f}",
+                    x=d['mean'], y=off + 1.05, 
+                    text=f"μ={d['mean']:.0f} σ={d['std']:.0f}",
                     showarrow=False, 
-                    font=dict(size=10, color='black', family="Arial Black"),
-                    bgcolor='rgba(255,255,255,0.9)', # White box for readability
-                    bordercolor=hexc, 
+                    # Font color inherited from the plot color for consistency
+                    font=dict(size=10, color=color_hex, family="Arial Black"),
+                    align="center",
+                    # Soft white background for readability in dark mode
+                    bgcolor='rgba(255,255,255,0.9)', 
+                    # Border color inherited from the plot color
+                    bordercolor=color_hex, 
                     borderwidth=1, 
-                    borderpad=3,
-                    yanchor='bottom'
+                    borderpad=3
                 )
 
             # Layout Fixes for Dark Mode
