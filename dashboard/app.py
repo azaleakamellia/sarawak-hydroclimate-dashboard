@@ -702,34 +702,55 @@ with tab_ml:
     
     # Filter to valid rows
     valid_ml = df_ml.dropna(subset=['Gauge_Observed', 'P_merged_hier', 'P_corrected']).copy()
-    
-    # Get the best model from leaderboard to highlight
-    best_model = leaderboard.iloc[0]['ML_Model'] if not leaderboard.empty else 'Gradient Boosting'
-    
+
+    # ✅ FIX #1: The parquet stores only the WINNING model's correction (no 'model_used' column).
+    # Detect this so we never index a missing column.
+    HAS_MODEL_COL = 'model_used' in valid_ml.columns
+
+    # ✅ FIX #2: Pick the best model by SORTING the leaderboard (previously iloc[0] was arbitrary).
+    if not leaderboard.empty and 'Composite_Score' in leaderboard.columns:
+        lb_sorted = leaderboard.sort_values('Composite_Score', ascending=False)
+        best_model = lb_sorted.iloc[0]['ML_Model']
+    elif not leaderboard.empty and 'ML_Model' in leaderboard.columns:
+        best_model = leaderboard.iloc[0]['ML_Model']
+    else:
+        best_model = 'ML-Corrected'
+
+    # Helper: slice for a model if row-level tags exist, else the whole frame (single winning model).
+    def get_model_slice(df, model_name):
+        return df[df['model_used'] == model_name] if HAS_MODEL_COL else df
+
     st.markdown("---")
-    
+
     # ==========================================================================
     # 1. TOP-LEVEL METRIC DECOMPOSITION (KGE Components)
     # ==========================================================================
-    st.markdown("#### 📊 1. Aggregate Performance Metrics (Best Model: " + best_model + ")")
-    
-    # Calculate metrics for the best model's corrected data
-    best_corrected = valid_ml[valid_ml['model_used'] == best_model]['P_corrected']
-    gauge = valid_ml[valid_ml['model_used'] == best_model]['Gauge_Observed']
-    
-    r_kge = np.corrcoef(gauge, best_corrected)[0, 1]
-    alpha = np.std(best_corrected) / np.std(gauge)
-    beta = np.mean(best_corrected) / np.mean(gauge)
-    kge = 1 - np.sqrt((r_kge - 1)**2 + (alpha - 1)**2 + (beta - 1)**2)
-    rmse = np.sqrt(np.mean((best_corrected - gauge)**2))
-    rbias = (np.mean(best_corrected) - np.mean(gauge)) / np.mean(gauge) * 100
-    
-    col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
-    col_m1.metric("KGE", f"{kge:.3f}", help="Kling-Gupta Efficiency (1.0 = perfect)")
-    col_m2.metric("Correlation (r)", f"{r_kge:.3f}", help="Linear correlation")
-    col_m3.metric("Variability (α)", f"{alpha:.3f}", help="Ratio of std dev (1.0 = perfect)")
-    col_m4.metric("Relative Bias (β)", f"{beta:.3f}", help="Ratio of means (1.0 = perfect)")
-    col_m5.metric("RMSE", f"{rmse:.2f} mm", f"{rbias:+.1f}% Bias", delta_color="inverse" if rbias > 0 else "normal")
+    st.markdown("#### 📊 1. Aggregate Performance Metrics (Best Model: " + str(best_model) + ")")
+    if not HAS_MODEL_COL:
+        st.caption("ℹ️ The corrected parquet stores a single `P_corrected` column produced by the winning model; per-model row tags are not available. Aggregate metrics below describe that best model; the leaderboard table holds the per-model comparison.")
+
+    ml_slice = get_model_slice(valid_ml, best_model)
+    paired = ml_slice[['Gauge_Observed', 'P_corrected']].dropna()
+
+    if len(paired) < 2:
+        st.warning("Insufficient paired Gauge/P_corrected records to compute aggregate metrics.")
+    else:
+        gauge = paired['Gauge_Observed']
+        best_corrected = paired['P_corrected']
+
+        r_kge = np.corrcoef(gauge, best_corrected)[0, 1]
+        alpha = np.std(best_corrected) / np.std(gauge)
+        beta = np.mean(best_corrected) / np.mean(gauge)
+        kge = 1 - np.sqrt((r_kge - 1)**2 + (alpha - 1)**2 + (beta - 1)**2)
+        rmse = np.sqrt(np.mean((best_corrected - gauge)**2))
+        rbias = (np.mean(best_corrected) - np.mean(gauge)) / np.mean(gauge) * 100
+
+        col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
+        col_m1.metric("KGE", f"{kge:.3f}", help="Kling-Gupta Efficiency (1.0 = perfect)")
+        col_m2.metric("Correlation (r)", f"{r_kge:.3f}", help="Linear correlation")
+        col_m3.metric("Variability (α)", f"{alpha:.3f}", help="Ratio of std dev (1.0 = perfect)")
+        col_m4.metric("Relative Bias (β)", f"{beta:.3f}", help="Ratio of means (1.0 = perfect)")
+        col_m5.metric("RMSE", f"{rmse:.2f} mm", f"{rbias:+.1f}% Bias", delta_color="inverse" if rbias > 0 else "normal")
 
     st.markdown("---")
 
@@ -881,15 +902,13 @@ with tab_ml:
     st.markdown("#### 📐 3. Unified Taylor Diagram")
     st.caption("Summarizes centered RMSE, standard deviation, and Pearson correlation on a single polar plot. The red star is the perfect reference. Points closer to the star indicate superior performance.")
     
-    # (Keep your existing, highly polished Taylor Diagram code here)
-    # For brevity, I am including the core logic. Ensure your existing Taylor code is pasted here.
     all_taylor_products = {
         'precip_chirps': 'CHIRPS (Raw)', 'precip_persiann': 'PERSIANN-CDR (Raw)', 'precip_era5_land': 'ERA5-Land (Raw)',
         'P_merged_global': 'P_merged (Global)', 'P_merged_hier': 'P_merged (Hierarchical)', 'P_corrected': 'ML-Corrected'
     }
     
-    # Filter to best model for clean Taylor diagram
-    df_taylor = valid_ml[valid_ml['model_used'] == best_model].copy()
+    # ✅ FIX #3: Use the same model-slice fallback (no 'model_used' column crash).
+    df_taylor = get_model_slice(valid_ml, best_model).copy()
     obs = df_taylor['Gauge_Observed']
     obs_std = np.std(obs)
     
